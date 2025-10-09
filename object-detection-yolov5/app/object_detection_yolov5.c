@@ -39,8 +39,11 @@
 #include "vdo-error.h"
 #include "vdo-frame.h"
 #include "vdo-types.h"
+#include <axsdk/axevent.h>
 #include <axsdk/axparameter.h>
 #include <bbox.h>
+#include <glib-object.h>
+#include <glib.h>
 
 #include <math.h>
 #include <signal.h>
@@ -66,6 +69,175 @@ typedef struct model_params {
     int num_detections;
     int size_per_detection;
 } model_params_t;
+
+// Event system structure to hold event handler and declaration
+typedef struct {
+    AXEventHandler* event_handler;
+    guint declaration_id;
+} event_system_t;
+
+/**
+ * Setup event declaration for object detection events.
+ * This declares a stateless ONVIF event for detected objects.
+ *
+ * Topic: tns1:VideoAnalytics/ObjectDetected
+ * Data elements: ObjectClass, Confidence, BoundingBox
+ *
+ * param event_handler The event handler to use
+ * return declaration id as integer
+ */
+static guint setup_object_detection_event(AXEventHandler* event_handler) {
+    AXEventKeyValueSet* key_value_set = NULL;
+    guint declaration                 = 0;
+    GError* error                     = NULL;
+
+    // Create key-value set for the event declaration
+    key_value_set = ax_event_key_value_set_new();
+
+    // Set up event topics (using video analytics namespace)
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "topic0",
+                                         "tns1",
+                                         "VideoAnalytics",
+                                         AX_VALUE_TYPE_STRING,
+                                         NULL);
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "topic1",
+                                         "tnsaxis",
+                                         "ObjectDetected",
+                                         AX_VALUE_TYPE_STRING,
+                                         NULL);
+
+    // Add data elements as placeholders (actual values sent with each event)
+    gchar* empty_string = "";
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "ObjectClass",
+                                         NULL,
+                                         empty_string,
+                                         AX_VALUE_TYPE_STRING,
+                                         NULL);
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "Confidence",
+                                         NULL,
+                                         empty_string,
+                                         AX_VALUE_TYPE_STRING,
+                                         NULL);
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "BoundingBox",
+                                         NULL,
+                                         empty_string,
+                                         AX_VALUE_TYPE_STRING,
+                                         NULL);
+
+    // Mark elements as data (not source)
+    ax_event_key_value_set_mark_as_data(key_value_set, "ObjectClass", NULL, NULL);
+    ax_event_key_value_set_mark_as_data(key_value_set, "Confidence", NULL, NULL);
+    ax_event_key_value_set_mark_as_data(key_value_set, "BoundingBox", NULL, NULL);
+
+    // Declare the event (stateless = TRUE)
+    if (!ax_event_handler_declare(event_handler,
+                                  key_value_set,
+                                  TRUE,  // Stateless event
+                                  &declaration,
+                                  NULL,  // No completion callback for stateless
+                                  NULL,  // No user data
+                                  &error)) {
+        syslog(LOG_ERR, "Failed to declare object detection event: %s", error->message);
+        g_error_free(error);
+        declaration = 0;
+    } else {
+        syslog(LOG_INFO, "Object detection event declared with ID: %d", declaration);
+    }
+
+    // Cleanup
+    ax_event_key_value_set_free(key_value_set);
+
+    return declaration;
+}
+
+/**
+ * Send an object detection event.
+ *
+ * param event_sys Event system containing handler and declaration
+ * param object_class The detected object class/label
+ * param confidence Detection confidence (0.0 - 1.0)
+ * param x1 Bounding box top-left x coordinate (normalized)
+ * param y1 Bounding box top-left y coordinate (normalized)
+ * param x2 Bounding box bottom-right x coordinate (normalized)
+ * param y2 Bounding box bottom-right y coordinate (normalized)
+ */
+static void send_object_detection_event(event_system_t* event_sys,
+                                        const char* object_class,
+                                        float confidence,
+                                        float x1,
+                                        float y1,
+                                        float x2,
+                                        float y2) {
+    AXEventKeyValueSet* key_value_set = NULL;
+    AXEvent* event                    = NULL;
+    GError* error                     = NULL;
+
+    if (!event_sys || !event_sys->event_handler || event_sys->declaration_id == 0) {
+        syslog(LOG_ERR, "Invalid event system");
+        return;
+    }
+
+    // Create key-value set for this specific event
+    key_value_set = ax_event_key_value_set_new();
+
+    // Add object class
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "ObjectClass",
+                                         NULL,
+                                         object_class,
+                                         AX_VALUE_TYPE_STRING,
+                                         NULL);
+
+    // Add confidence as string
+    char confidence_str[32];
+    snprintf(confidence_str, sizeof(confidence_str), "%.2f", confidence);
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "Confidence",
+                                         NULL,
+                                         confidence_str,
+                                         AX_VALUE_TYPE_STRING,
+                                         NULL);
+
+    // Add bounding box as string
+    char bbox_str[128];
+    snprintf(bbox_str, sizeof(bbox_str), "%.3f,%.3f,%.3f,%.3f", x1, y1, x2, y2);
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "BoundingBox",
+                                         NULL,
+                                         bbox_str,
+                                         AX_VALUE_TYPE_STRING,
+                                         NULL);
+
+    // Create the event
+    event = ax_event_new2(key_value_set, NULL);
+
+    // Send the event
+    if (!ax_event_handler_send_event(event_sys->event_handler,
+                                     event_sys->declaration_id,
+                                     event,
+                                     &error)) {
+        syslog(LOG_ERR, "Failed to send object detection event: %s", error->message);
+        g_error_free(error);
+    } else {
+        syslog(LOG_INFO,
+               "Event sent: %s (%.2f) at [%.3f,%.3f,%.3f,%.3f]",
+               object_class,
+               confidence,
+               x1,
+               y1,
+               x2,
+               y2);
+    }
+
+    // Cleanup
+    ax_event_free(event);
+    ax_event_key_value_set_free(key_value_set);
+}
 
 static int ax_parameter_get_int(AXParameter* handle, const char* name) {
     gchar* str_value = NULL;
@@ -247,6 +419,7 @@ int main(int argc, char** argv) {
     model_provider_t* model_provider      = NULL;
     model_tensor_output_t* tensor_outputs = NULL;
     bbox_t* bbox                          = NULL;
+    event_system_t* event_sys             = NULL;
 
     // Stop main loop at signal
     signal(SIGTERM, shutdown);
@@ -359,6 +532,22 @@ int main(int argc, char** argv) {
 
     bbox = setup_bbox();
 
+    // Initialize event system
+    event_sys = malloc(sizeof(event_system_t));
+    if (!event_sys) {
+        panic("Failed to allocate event system");
+    }
+
+    event_sys->event_handler = ax_event_handler_new();
+    if (!event_sys->event_handler) {
+        panic("Failed to create event handler");
+    }
+
+    event_sys->declaration_id = setup_object_detection_event(event_sys->event_handler);
+    if (event_sys->declaration_id == 0) {
+        syslog(LOG_WARNING, "Failed to setup object detection event - events will not be sent");
+    }
+
     int size_per_detection = model_params->size_per_detection;
     float qt_zero_point    = model_params->quantization_zero_point;
     float qt_scale         = model_params->quantization_scale;
@@ -464,6 +653,17 @@ int main(int argc, char** argv) {
                                                   &highest_class_likelihood,
                                                   &label_idx,
                                                   &object_likelihood);
+
+            // if label index is out of bounds, skip this detection
+            int scrubber_model_class = 4;  // The scrubber model has 4 classes
+            if (label_idx < 0 || (size_t)label_idx >= scrubber_model_class) {
+                syslog(LOG_WARNING,
+                       "Label index %d out of bounds (num_labels=%zu), skipping detection",
+                       label_idx,
+                       scrubber_model_class);
+                continue;
+            }
+
             // Log info about object
             syslog(LOG_INFO,
                    "Object %d: Label=%s, Object Likelihood=%.2f, Class Likelihood=%.2f, ",
@@ -483,6 +683,19 @@ int main(int argc, char** argv) {
                                        &x2,
                                        &y2);
             syslog(LOG_INFO, "Bounding Box: [%.2f, %.2f, %.2f, %.2f]", x1, y1, x2, y2);
+
+            // Send object detection event
+            if (event_sys && event_sys->declaration_id != 0) {
+                syslog(LOG_INFO, "Sending object detection event");
+                send_object_detection_event(event_sys,
+                                            labels[label_idx],
+                                            highest_class_likelihood,
+                                            x1,
+                                            y1,
+                                            x2,
+                                            y2);
+                syslog(LOG_INFO, "Event sent.");
+            }
 
             // No need to compensate for rotation since bbox will handle this
             bbox_coordinates_frame_normalized(bbox);
@@ -515,6 +728,19 @@ end:
     free(labels);
     free(label_file_data);
     bbox_destroy(bbox);
+
+    // Cleanup event system
+    if (event_sys) {
+        if (event_sys->event_handler) {
+            if (event_sys->declaration_id != 0) {
+                ax_event_handler_undeclare(event_sys->event_handler,
+                                           event_sys->declaration_id,
+                                           NULL);
+            }
+            ax_event_handler_free(event_sys->event_handler);
+        }
+        free(event_sys);
+    }
 
     syslog(LOG_INFO, "Exit %s", argv[0]);
 

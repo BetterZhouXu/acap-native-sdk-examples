@@ -29,22 +29,11 @@ RUN . /opt/venv/bin/activate && pip install --no-cache-dir tensorflow
 # Download pre-trained YOLOv5 model
 WORKDIR /opt/app/model
 ARG CHIP=artpec8
-ARG MODEL_BUCKET=https://acap-ml-models.s3.amazonaws.com/yolov5
-RUN if [ "$CHIP" = cpu ] || [ "$CHIP" = artpec8 ]; then \
-        curl -L -o model.tflite \
-        $MODEL_BUCKET/yolov5n_artpec8_coco_640.tflite ; \
-    elif [ "$CHIP" = artpec9 ]; then \
-        curl -L -o model.tflite \
-        $MODEL_BUCKET/yolov5n_artpec9_coco_640.tflite ; \
-    else \
-        printf "Error: '%s' is not a valid value for the CHIP variable\n", "$CHIP"; \
-        exit 1; \
-    fi
+COPY ./app/model/model.tflite /opt/app/model/model.tflite
 
 # Download labels for model
 WORKDIR /opt/app/label
-RUN curl -L -o labels.txt \
-    https://github.com/google-coral/test_data/raw/master/coco_labels.txt
+COPY ./app/label/labels.txt /opt/app/label/labels.txt
 
 #-------------------------------------------------------------------------------
 # Build ACAP application
