@@ -144,16 +144,6 @@ static void send_object_detection_event(const char* object_class,
     ax_event_free(event);
 }
 
-// Add this function to process pending GLib events
-static void process_glib_events(void) {
-    GMainContext* context = g_main_context_default();
-
-    // Process all pending events (non-blocking)
-    while (g_main_context_pending(context)) {
-        g_main_context_iteration(context, FALSE);
-    }
-}
-
 /**
  * Callback function which is called when event declaration is completed.
  * Following the exact pattern from send_event.c
