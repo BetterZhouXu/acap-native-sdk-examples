@@ -606,6 +606,12 @@ int main(int argc, char** argv) {
     float qt_zero_point    = model_params->quantization_zero_point;
     float qt_scale         = model_params->quantization_scale;
 
+    // test send event right away
+    syslog(LOG_INFO, "Sending test object detection events");
+    send_object_detection_event("TestObject1", 0.99, 0.1, 0.2, 0.3, 0.4);
+    send_object_detection_event("TestObject2", 0.88, 0.1, 0.2, 0.3, 0.4);
+    send_object_detection_event("TestObject3", 0.77, 0.1, 0.2, 0.3, 0.4);
+
     while (running) {
         struct timeval start_ts, end_ts;
         unsigned int preprocessing_ms = 0;
