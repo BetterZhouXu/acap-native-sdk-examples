@@ -49,11 +49,10 @@ RUN . /opt/venv/bin/activate && python parameter_finder.py 'model/model.tflite'
 RUN cp /opt/app/manifest.json.${CHIP} /opt/app/manifest.json && \
     . /opt/axis/acapsdk/environment-setup* && acap-build . \
     -a 'label/labels.txt' \
-    -a 'model/model.tflite'
+    -a 'model/model.tflite' \
+    -a 'lib/libbbox.so.1'
 
 RUN apt-get update && apt-get install -y patchelf
-RUN patchelf --set-rpath '$ORIGIN/lib' /opt/app/object_detection_yolov5
-
-# (Optional) Copy libbbox and strip binary
 RUN mkdir -p /opt/app/lib
 RUN cp /opt/axis/acapsdk/sysroots/aarch64/usr/lib/libbbox.so.1 /opt/app/lib/
+RUN patchelf --set-rpath '$ORIGIN/lib' /opt/app/object_detection_yolov5
