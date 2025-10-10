@@ -17,3 +17,4 @@ param.conf
 // Ignore files from eap-install.sh
 **/*var_log_messages.*
 **/.eap-install.cfg
+object-detection-yolov5/labels.txt
