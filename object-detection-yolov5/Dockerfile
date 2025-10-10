@@ -50,3 +50,6 @@ RUN cp /opt/app/manifest.json.${CHIP} /opt/app/manifest.json && \
     . /opt/axis/acapsdk/environment-setup* && acap-build . \
     -a 'label/labels.txt' \
     -a 'model/model.tflite'
+
+RUN apt-get update && apt-get install -y patchelf
+RUN patchelf --set-rpath '$ORIGIN/lib' /opt/app/object_detection_yolov5
