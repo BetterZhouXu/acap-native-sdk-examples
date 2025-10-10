@@ -180,7 +180,7 @@ static guint setup_object_detection_declaration(AXEventHandler* event_handler) {
                                          NULL);
     ax_event_key_value_set_add_key_value(key_value_set,
                                          "topic1",
-                                         "tnsaxis",
+                                         "tns1",
                                          "ObjectDetected",
                                          AX_VALUE_TYPE_STRING,
                                          NULL);
