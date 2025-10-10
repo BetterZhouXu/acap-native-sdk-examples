@@ -47,17 +47,20 @@ COPY ./app .
 # hadolint ignore=SC1091
 RUN . /opt/venv/bin/activate && python parameter_finder.py 'model/model.tflite'
 
-# Create lib directory and copy the bbox library BEFORE building
-RUN mkdir -p /opt/app/lib
-RUN cp /opt/axis/acapsdk/sysroots/aarch64/usr/lib/libbbox.so.1 /opt/app/lib/
+# Build the application first
+RUN cp /opt/app/manifest.json.${CHIP} /opt/app/manifest.json && \
+    . /opt/axis/acapsdk/environment-setup* && make
 
-# Set RPATH so the application looks in the lib directory first
+# Create lib directory and copy the bbox library AFTER building
+RUN mkdir -p lib
+RUN cp /opt/axis/acapsdk/sysroots/aarch64/usr/lib/libbbox.so.1 lib/
+
+# Set RPATH on the compiled binary
 RUN . /opt/axis/acapsdk/environment-setup* && \
     patchelf --set-rpath '$ORIGIN/lib' object_detection_yolov5
 
-# Build the ACAP package with all files included
-RUN cp /opt/app/manifest.json.${CHIP} /opt/app/manifest.json && \
-    . /opt/axis/acapsdk/environment-setup* && acap-build . \
+# Package the ACAP with all files included
+RUN . /opt/axis/acapsdk/environment-setup* && acap-build . \
     -a 'label/labels.txt' \
     -a 'model/model.tflite' \
     -a 'lib/libbbox.so.1'
