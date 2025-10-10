@@ -91,8 +91,12 @@ static guint setup_object_detection_event(AXEventHandler* event_handler) {
     guint declaration                 = 0;
     GError* error                     = NULL;
 
-    // Create key-value set for declaration
+    // Create key-value set for declaration (stateless event)
     key_value_set = ax_event_key_value_set_new();
+    if (!key_value_set) {
+        syslog(LOG_ERR, "Failed to create key-value set for declaration");
+        return 0;
+    }
 
     // Set up event topics
     ax_event_key_value_set_add_key_value(key_value_set,
@@ -108,7 +112,7 @@ static guint setup_object_detection_event(AXEventHandler* event_handler) {
                                          AX_VALUE_TYPE_STRING,
                                          NULL);
 
-    // Add data elements
+    // Add data elements (empty values for declaration)
     ax_event_key_value_set_add_key_value(key_value_set,
                                          "ObjectClass",
                                          NULL,
@@ -128,26 +132,22 @@ static guint setup_object_detection_event(AXEventHandler* event_handler) {
                                          AX_VALUE_TYPE_STRING,
                                          NULL);
 
-    // Mark as data elements
+    // Mark elements as data
     ax_event_key_value_set_mark_as_data(key_value_set, "ObjectClass", NULL, NULL);
     ax_event_key_value_set_mark_as_data(key_value_set, "Confidence", NULL, NULL);
     ax_event_key_value_set_mark_as_data(key_value_set, "BoundingBox", NULL, NULL);
 
-    // Declare the event - use correct API signature
-    if (!ax_event_handler_declare(event_handler,
-                                  key_value_set,
-                                  TRUE,  // stateless
-                                  &declaration,
-                                  NULL,  // completion callback
-                                  NULL,  // user data
-                                  &error)) {
-        syslog(LOG_ERR, "Failed to declare event: %s", error ? error->message : "Unknown");
+    // Declare the event (stateless)
+    if (!ax_event_handler_declare(event_handler, key_value_set, &declaration, &error)) {
+        syslog(LOG_ERR,
+               "Failed to declare object detection event: %s",
+               error ? error->message : "Unknown error");
         if (error) {
             g_error_free(error);
         }
         declaration = 0;
     } else {
-        syslog(LOG_INFO, "Event declared successfully with ID: %u", declaration);
+        syslog(LOG_INFO, "Object detection event declared with ID: %u", declaration);
     }
 
     // Cleanup
@@ -168,6 +168,7 @@ static guint setup_object_detection_event(AXEventHandler* event_handler) {
  * param y2 Bounding box bottom-right y coordinate (normalized)
  */
 // Corrected send function based on the actual API
+// Corrected send function using the proper API (similar to send_event.c)
 static void send_object_detection_event(event_system_t* event_sys,
                                         const char* object_class,
                                         float confidence,
@@ -175,77 +176,73 @@ static void send_object_detection_event(event_system_t* event_sys,
                                         float y1,
                                         float x2,
                                         float y2) {
-    AXEvent* event = NULL;
-    GError* error  = NULL;
+    AXEventKeyValueSet* key_value_set = NULL;
+    GError* error                     = NULL;
 
     if (!event_sys || !event_sys->event_handler || event_sys->declaration_id == 0) {
         syslog(LOG_ERR, "Invalid event system");
         return;
     }
 
-    // Create event object
-    event = ax_event_new();
-    if (!event) {
-        syslog(LOG_ERR, "Failed to create new event");
+    // Create key-value set for this event (like in send_event.c)
+    key_value_set = ax_event_key_value_set_new();
+    if (!key_value_set) {
+        syslog(LOG_ERR, "Failed to create key-value set");
         return;
     }
 
-    // Set event data using the correct API
-    if (!ax_event_set_key_value(event,
-                                "ObjectClass",
-                                NULL,
-                                object_class,
-                                AX_VALUE_TYPE_STRING,
-                                &error)) {
-        syslog(LOG_ERR, "Failed to set ObjectClass: %s", error ? error->message : "Unknown");
-        goto cleanup;
-    }
+    // Add object class
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "ObjectClass",
+                                         NULL,
+                                         object_class,
+                                         AX_VALUE_TYPE_STRING,
+                                         NULL);
 
-    // Add confidence
+    // Add confidence as string
     char confidence_str[32];
     snprintf(confidence_str, sizeof(confidence_str), "%.2f", confidence);
-    if (!ax_event_set_key_value(event,
-                                "Confidence",
-                                NULL,
-                                confidence_str,
-                                AX_VALUE_TYPE_STRING,
-                                &error)) {
-        syslog(LOG_ERR, "Failed to set Confidence: %s", error ? error->message : "Unknown");
-        goto cleanup;
-    }
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "Confidence",
+                                         NULL,
+                                         confidence_str,
+                                         AX_VALUE_TYPE_STRING,
+                                         NULL);
 
-    // Add bounding box
+    // Add bounding box as string
     char bbox_str[128];
     snprintf(bbox_str, sizeof(bbox_str), "%.3f,%.3f,%.3f,%.3f", x1, y1, x2, y2);
-    if (!ax_event_set_key_value(event,
-                                "BoundingBox",
-                                NULL,
-                                bbox_str,
-                                AX_VALUE_TYPE_STRING,
-                                &error)) {
-        syslog(LOG_ERR, "Failed to set BoundingBox: %s", error ? error->message : "Unknown");
-        goto cleanup;
-    }
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "BoundingBox",
+                                         NULL,
+                                         bbox_str,
+                                         AX_VALUE_TYPE_STRING,
+                                         NULL);
 
-    // Send the event with correct parameters
+    // Send the event using the key-value set directly (like send_event.c does)
     if (!ax_event_handler_send_event(event_sys->event_handler,
-                                     event_sys->declaration_id,
-                                     event,
+                                     key_value_set,
+                                     &event_sys->declaration_id,
                                      &error)) {
         syslog(LOG_ERR,
                "Failed to send object detection event: %s",
                error ? error->message : "Unknown error");
+        if (error) {
+            g_error_free(error);
+        }
     } else {
-        syslog(LOG_INFO, "Event sent successfully: %s (conf: %.2f)", object_class, confidence);
+        syslog(LOG_INFO,
+               "Event sent: %s (%.2f) at [%.3f,%.3f,%.3f,%.3f]",
+               object_class,
+               confidence,
+               x1,
+               y1,
+               x2,
+               y2);
     }
 
-cleanup:
-    if (error) {
-        g_error_free(error);
-    }
-    if (event) {
-        g_object_unref(event);
-    }
+    // Cleanup
+    g_object_unref(key_value_set);
 }
 
 static int ax_parameter_get_int(AXParameter* handle, const char* name) {
