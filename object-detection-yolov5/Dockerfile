@@ -53,3 +53,8 @@ RUN cp /opt/app/manifest.json.${CHIP} /opt/app/manifest.json && \
 
 RUN apt-get update && apt-get install -y patchelf
 RUN patchelf --set-rpath '$ORIGIN/lib' /opt/app/object_detection_yolov5
+
+# (Optional) Copy libbbox and strip binary
+RUN mkdir -p /opt/app/lib
+RUN cp /opt/axis/acapsdk/sysroots/aarch64/usr/lib/libbbox.so.1 /opt/app/lib/
+RUN strip /opt/app/object_detection_yolov5

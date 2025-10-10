@@ -30,7 +30,7 @@ $(PROG1): $(OBJS1)
 	install -d $(DEBUG_DIR)
 	$(CC) $^ $(CFLAGS) $(LIBS) $(LDFLAGS) -lm $(LDLIBS) -o $(DEBUG_DIR)/$@
 	cp $(DEBUG_DIR)/$@ .
-	$(STRIP) $@
+# 	$(STRIP) $@
 
 clean:
 	rm -rf $(PROGS) *.o *.eap* *_LICENSE.txt package.conf* param.conf tmp* manifest.json $(DEBUG_DIR)
