@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     python3-venv \
+    patchelf \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a virtual environment for installations using pip
@@ -46,13 +47,17 @@ COPY ./app .
 # hadolint ignore=SC1091
 RUN . /opt/venv/bin/activate && python parameter_finder.py 'model/model.tflite'
 
+# Create lib directory and copy the bbox library BEFORE building
+RUN mkdir -p /opt/app/lib
+RUN cp /opt/axis/acapsdk/sysroots/aarch64/usr/lib/libbbox.so.1 /opt/app/lib/
+
+# Set RPATH so the application looks in the lib directory first
+RUN . /opt/axis/acapsdk/environment-setup* && \
+    patchelf --set-rpath '$ORIGIN/lib' object_detection_yolov5
+
+# Build the ACAP package with all files included
 RUN cp /opt/app/manifest.json.${CHIP} /opt/app/manifest.json && \
     . /opt/axis/acapsdk/environment-setup* && acap-build . \
     -a 'label/labels.txt' \
     -a 'model/model.tflite' \
     -a 'lib/libbbox.so.1'
-
-RUN apt-get update && apt-get install -y patchelf
-RUN mkdir -p /opt/app/lib
-RUN cp /opt/axis/acapsdk/sysroots/aarch64/usr/lib/libbbox.so.1 /opt/app/lib/
-RUN patchelf --set-rpath '$ORIGIN/lib' /opt/app/object_detection_yolov5
