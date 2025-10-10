@@ -78,27 +78,17 @@ typedef struct {
 
 /**
  * Setup event declaration for object detection events.
- * This declares a stateless ONVIF event for detected objects.
- *
- * Topic: tns1:VideoAnalytics/ObjectDetected
- * Data elements: ObjectClass, Confidence, BoundingBox
- *
- * param event_handler The event handler to use
- * return declaration id as integer
+ * Following the pattern from send_event.c
  */
 static guint setup_object_detection_event(AXEventHandler* event_handler) {
     AXEventKeyValueSet* key_value_set = NULL;
     guint declaration                 = 0;
     GError* error                     = NULL;
 
-    // Create key-value set for declaration (stateless event)
+    // Create key-value set for declaration
     key_value_set = ax_event_key_value_set_new();
-    if (!key_value_set) {
-        syslog(LOG_ERR, "Failed to create key-value set for declaration");
-        return 0;
-    }
 
-    // Set up event topics
+    // Set up event topics (following send_event.c pattern)
     ax_event_key_value_set_add_key_value(key_value_set,
                                          "topic0",
                                          "tns1",
@@ -112,63 +102,58 @@ static guint setup_object_detection_event(AXEventHandler* event_handler) {
                                          AX_VALUE_TYPE_STRING,
                                          NULL);
 
-    // Add data elements (empty values for declaration)
+    // Add data elements with initial empty string values (like send_event.c does with Value)
+    const char* empty_string = "";
     ax_event_key_value_set_add_key_value(key_value_set,
                                          "ObjectClass",
                                          NULL,
-                                         "",
+                                         &empty_string,
                                          AX_VALUE_TYPE_STRING,
                                          NULL);
     ax_event_key_value_set_add_key_value(key_value_set,
                                          "Confidence",
                                          NULL,
-                                         "",
+                                         &empty_string,
                                          AX_VALUE_TYPE_STRING,
                                          NULL);
     ax_event_key_value_set_add_key_value(key_value_set,
                                          "BoundingBox",
                                          NULL,
-                                         "",
+                                         &empty_string,
                                          AX_VALUE_TYPE_STRING,
                                          NULL);
 
-    // Mark elements as data
+    // Mark elements as data (like send_event.c marks "Value" as data)
     ax_event_key_value_set_mark_as_data(key_value_set, "ObjectClass", NULL, NULL);
     ax_event_key_value_set_mark_as_data(key_value_set, "Confidence", NULL, NULL);
     ax_event_key_value_set_mark_as_data(key_value_set, "BoundingBox", NULL, NULL);
 
-    // Declare the event (stateless)
-    if (!ax_event_handler_declare(event_handler, key_value_set, &declaration, &error)) {
-        syslog(LOG_ERR,
-               "Failed to declare object detection event: %s",
-               error ? error->message : "Unknown error");
-        if (error) {
-            g_error_free(error);
-        }
-        declaration = 0;
+    // Declare the event using the same pattern as send_event.c
+    // Note: send_event.c uses FALSE for stateful events, we use TRUE for stateless
+    if (!ax_event_handler_declare(
+            event_handler,
+            key_value_set,
+            TRUE,  // TRUE for stateless events (FALSE for stateful like send_event.c)
+            &declaration,
+            NULL,  // No completion callback for stateless events
+            NULL,  // No user data
+            &error)) {
+        syslog(LOG_WARNING, "Could not declare object detection event: %s", error->message);
+        g_error_free(error);
     } else {
         syslog(LOG_INFO, "Object detection event declared with ID: %u", declaration);
     }
 
-    // Cleanup
-    g_object_unref(key_value_set);
+    // The key/value set is no longer needed (following send_event.c pattern)
+    ax_event_key_value_set_free(key_value_set);
 
     return declaration;
 }
 
 /**
  * Send an object detection event.
- *
- * param event_sys Event system containing handler and declaration
- * param object_class The detected object class/label
- * param confidence Detection confidence (0.0 - 1.0)
- * param x1 Bounding box top-left x coordinate (normalized)
- * param y1 Bounding box top-left y coordinate (normalized)
- * param x2 Bounding box bottom-right x coordinate (normalized)
- * param y2 Bounding box bottom-right y coordinate (normalized)
+ * Following the exact pattern from send_event.c
  */
-// Corrected send function based on the actual API
-// Corrected send function using the proper API (similar to send_event.c)
 static void send_object_detection_event(event_system_t* event_sys,
                                         const char* object_class,
                                         float confidence,
@@ -177,72 +162,140 @@ static void send_object_detection_event(event_system_t* event_sys,
                                         float x2,
                                         float y2) {
     AXEventKeyValueSet* key_value_set = NULL;
-    GError* error                     = NULL;
+    AXEvent* event                    = NULL;
 
     if (!event_sys || !event_sys->event_handler || event_sys->declaration_id == 0) {
         syslog(LOG_ERR, "Invalid event system");
         return;
     }
 
-    // Create key-value set for this event (like in send_event.c)
+    // Create key-value set for this event (following send_event.c pattern)
     key_value_set = ax_event_key_value_set_new();
-    if (!key_value_set) {
-        syslog(LOG_ERR, "Failed to create key-value set");
-        return;
-    }
 
-    // Add object class
+    // Add the variable elements of the event to the set (like send_event.c adds "Value")
     ax_event_key_value_set_add_key_value(key_value_set,
                                          "ObjectClass",
                                          NULL,
-                                         object_class,
+                                         &object_class,
                                          AX_VALUE_TYPE_STRING,
                                          NULL);
 
-    // Add confidence as string
+    // Convert confidence to string and add it
     char confidence_str[32];
     snprintf(confidence_str, sizeof(confidence_str), "%.2f", confidence);
+    const char* conf_ptr = confidence_str;
     ax_event_key_value_set_add_key_value(key_value_set,
                                          "Confidence",
                                          NULL,
-                                         confidence_str,
+                                         &conf_ptr,
                                          AX_VALUE_TYPE_STRING,
                                          NULL);
 
-    // Add bounding box as string
+    // Convert bounding box to string and add it
     char bbox_str[128];
     snprintf(bbox_str, sizeof(bbox_str), "%.3f,%.3f,%.3f,%.3f", x1, y1, x2, y2);
+    const char* bbox_ptr = bbox_str;
     ax_event_key_value_set_add_key_value(key_value_set,
                                          "BoundingBox",
                                          NULL,
-                                         bbox_str,
+                                         &bbox_ptr,
                                          AX_VALUE_TYPE_STRING,
                                          NULL);
 
-    // Send the event using the key-value set directly (like send_event.c does)
-    if (!ax_event_handler_send_event(event_sys->event_handler,
-                                     key_value_set,
-                                     &event_sys->declaration_id,
-                                     &error)) {
-        syslog(LOG_ERR,
-               "Failed to send object detection event: %s",
-               error ? error->message : "Unknown error");
-        if (error) {
-            g_error_free(error);
-        }
-    } else {
-        syslog(LOG_INFO,
-               "Event sent: %s (%.2f) at [%.3f,%.3f,%.3f,%.3f]",
-               object_class,
-               confidence,
-               x1,
-               y1,
-               x2,
-               y2);
+    // Create the event using ax_event_new2 (like send_event.c)
+    event = ax_event_new2(key_value_set, NULL);
+
+    // The key/value set is no longer needed (following send_event.c pattern)
+    ax_event_key_value_set_free(key_value_set);
+
+    // Send the event (following send_event.c pattern exactly)
+    ax_event_handler_send_event(event_sys->event_handler, event_sys->declaration_id, event, NULL);
+
+    syslog(LOG_INFO,
+           "Send object detection event: %s (%.2f) at [%.3f,%.3f,%.3f,%.3f]",
+           object_class,
+           confidence,
+           x1,
+           y1,
+           x2,
+           y2);
+
+    // Free the event (following send_event.c pattern)
+    ax_event_free(event);
+}
+
+/**
+ * Send an object detection event.
+ * Following the exact pattern from send_event.c
+ */
+static void send_object_detection_event(event_system_t* event_sys,
+                                        const char* object_class,
+                                        float confidence,
+                                        float x1,
+                                        float y1,
+                                        float x2,
+                                        float y2) {
+    AXEventKeyValueSet* key_value_set = NULL;
+    AXEvent* event                    = NULL;
+
+    if (!event_sys || !event_sys->event_handler || event_sys->declaration_id == 0) {
+        syslog(LOG_ERR, "Invalid event system");
+        return;
     }
 
-    // Cleanup
-    g_object_unref(key_value_set);
+    // Create key-value set for this event (following send_event.c pattern)
+    key_value_set = ax_event_key_value_set_new();
+
+    // Add the variable elements of the event to the set (like send_event.c adds "Value")
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "ObjectClass",
+                                         NULL,
+                                         &object_class,
+                                         AX_VALUE_TYPE_STRING,
+                                         NULL);
+
+    // Convert confidence to string and add it
+    char confidence_str[32];
+    snprintf(confidence_str, sizeof(confidence_str), "%.2f", confidence);
+    const char* conf_ptr = confidence_str;
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "Confidence",
+                                         NULL,
+                                         &conf_ptr,
+                                         AX_VALUE_TYPE_STRING,
+                                         NULL);
+
+    // Convert bounding box to string and add it
+    char bbox_str[128];
+    snprintf(bbox_str, sizeof(bbox_str), "%.3f,%.3f,%.3f,%.3f", x1, y1, x2, y2);
+    const char* bbox_ptr = bbox_str;
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "BoundingBox",
+                                         NULL,
+                                         &bbox_ptr,
+                                         AX_VALUE_TYPE_STRING,
+                                         NULL);
+
+    // Create the event using ax_event_new2 (like send_event.c)
+    event = ax_event_new2(key_value_set, NULL);
+
+    // The key/value set is no longer needed (following send_event.c pattern)
+    ax_event_key_value_set_free(key_value_set);
+
+    // Send the event (following send_event.c pattern exactly)
+    ax_event_handler_send_event(event_sys->event_handler, event_sys->declaration_id, event, NULL);
+
+    syslog(LOG_INFO,
+           "Send object detection event: %s (%.2f) at [%.3f,%.3f,%.3f,%.3f]",
+           object_class,
+           confidence,
+           x1,
+           y1,
+           x2,
+           y2);
+
+    // Free the event (following send_event.c pattern)
+    ax_event_free(event);
 }
 
 static int ax_parameter_get_int(AXParameter* handle, const char* name) {
