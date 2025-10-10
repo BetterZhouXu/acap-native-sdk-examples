@@ -656,9 +656,9 @@ int main(int argc, char** argv) {
 
             // if label index is out of bounds, skip this detection
             int scrubber_model_class = 4;  // The scrubber model has 4 classes
-            if (label_idx < 0 || (size_t)label_idx >= scrubber_model_class) {
+            if (label_idx < 0 || label_idx >= scrubber_model_class) {
                 syslog(LOG_WARNING,
-                       "Label index %d out of bounds (num_labels=%zu), skipping detection",
+                       "Label index %d out of bounds (num_labels=%d), skipping detection",
                        label_idx,
                        scrubber_model_class);
                 continue;
