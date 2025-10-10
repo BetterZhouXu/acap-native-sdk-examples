@@ -144,6 +144,16 @@ static void send_object_detection_event(const char* object_class,
     ax_event_free(event);
 }
 
+// Add this function to process pending GLib events
+static void process_glib_events(void) {
+    GMainContext* context = g_main_context_default();
+
+    // Process all pending events (non-blocking)
+    while (g_main_context_pending(context)) {
+        g_main_context_iteration(context, FALSE);
+    }
+}
+
 /**
  * Callback function which is called when event declaration is completed.
  * Following the exact pattern from send_event.c
@@ -154,6 +164,9 @@ static void declaration_complete(guint declaration, gpointer user_data) {
 
     // Mark declaration as complete so we can start sending events
     event_system->declaration_complete = TRUE;
+    syslog(LOG_INFO,
+           "Event declaration marked as complete, status of declaration_complete=%d",
+           event_system->declaration_complete);
 
     // Note: Unlike send_event.c, we don't set up a timer here
     // We'll send events immediately when objects are detected
@@ -491,17 +504,21 @@ int main(int argc, char** argv) {
 
     initialize_event_system();
 
-    // 🟡 Wait for the event declaration to complete before proceeding
-    int wait_counter = 0;
-    while (!event_system->declaration_complete && wait_counter < 10) {
-        syslog(LOG_INFO, "Waiting for event declaration to complete...");
-        usleep(100000);  // wait 100ms
-        wait_counter++;
+    syslog(LOG_INFO, "Waiting for event declaration to complete...");
+
+    // Process GLib events for a short time to allow declaration to complete
+    for (int i = 0; i < 50; i++) {  // Wait up to 5 seconds (50 * 100ms)
+        process_glib_events();
+        usleep(100000);  // Sleep 100ms
+
+        if (event_system && event_system->declaration_complete) {
+            syslog(LOG_INFO, "Event declaration completed successfully");
+            break;
+        }
     }
 
-    if (!event_system->declaration_complete) {
-        syslog(LOG_ERR, "Event declaration did not complete. Exiting.");
-        return 1;
+    if (!event_system || !event_system->declaration_complete) {
+        syslog(LOG_WARNING, "Event declaration did not complete in time");
     }
 
     // Stop main loop at signal
