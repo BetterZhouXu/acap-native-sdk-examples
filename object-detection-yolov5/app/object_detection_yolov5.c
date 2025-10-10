@@ -51,6 +51,7 @@
 #include <axsdk/axevent.h>
 #include <glib-object.h>
 #include <glib.h>
+#include <unistd.h>
 
 #define APP_NAME "object_detection_yolov5"
 
@@ -65,7 +66,6 @@ static void shutdown(int status) {
 typedef struct {
     AXEventHandler* event_handler;
     guint event_id;
-    gboolean declaration_complete;
 } EventSystem;
 
 static EventSystem* event_system = NULL;
@@ -84,7 +84,7 @@ static void send_object_detection_event(const char* object_class,
     AXEvent* event                    = NULL;
 
     // Only send if declaration is complete
-    if (!event_system || !event_system->declaration_complete) {
+    if (!event_system) {
         syslog(LOG_WARNING, "Event declaration not complete, skipping event");
         return;
     }
@@ -163,10 +163,10 @@ static void declaration_complete(guint declaration, gpointer user_data) {
     ((void)user_data);  // Suppress "unused parameter" warning
 
     // Mark declaration as complete so we can start sending events
-    event_system->declaration_complete = TRUE;
-    syslog(LOG_INFO,
-           "Event declaration marked as complete, status of declaration_complete=%d",
-           event_system->declaration_complete);
+    // event_system->declaration_complete = TRUE;
+    // syslog(LOG_INFO,
+    //        "Event declaration marked as complete, status of declaration_complete=%d",
+    //        event_system->declaration_complete);
 
     // Note: Unlike send_event.c, we don't set up a timer here
     // We'll send events immediately when objects are detected
@@ -269,9 +269,7 @@ static guint setup_object_detection_declaration(AXEventHandler* event_handler) {
         syslog(LOG_WARNING, "Could not declare object detection event: %s", error->message);
         g_error_free(error);
     }
-    syslog(LOG_INFO,
-           "Declared object detection event, status of declaration_complete=%d",
-           event_system->declaration_complete);
+    syslog(LOG_INFO, "Declared object detection event inside setup_object_detection_declaration");
 
     // The key/value set is no longer needed (like send_event.c)
     ax_event_key_value_set_free(key_value_set);
@@ -285,9 +283,8 @@ static void initialize_event_system(void) {
     syslog(LOG_INFO, "Initializing object detection event system");
 
     // Allocate event system (like send_event.c allocates app_data)
-    event_system                       = calloc(1, sizeof(EventSystem));
-    event_system->event_handler        = ax_event_handler_new();
-    event_system->declaration_complete = FALSE;
+    event_system                = calloc(1, sizeof(EventSystem));
+    event_system->event_handler = ax_event_handler_new();
 
     // Setup declaration (like send_event.c)
     event_system->event_id = setup_object_detection_declaration(event_system->event_handler);
@@ -503,23 +500,6 @@ int main(int argc, char** argv) {
     bbox_t* bbox                          = NULL;
 
     initialize_event_system();
-
-    syslog(LOG_INFO, "Waiting for event declaration to complete...");
-
-    // Process GLib events for a short time to allow declaration to complete
-    for (int i = 0; i < 50; i++) {  // Wait up to 5 seconds (50 * 100ms)
-        process_glib_events();
-        usleep(100000);  // Sleep 100ms
-
-        if (event_system && event_system->declaration_complete) {
-            syslog(LOG_INFO, "Event declaration completed successfully");
-            break;
-        }
-    }
-
-    if (!event_system || !event_system->declaration_complete) {
-        syslog(LOG_WARNING, "Event declaration did not complete in time");
-    }
 
     // Stop main loop at signal
     signal(SIGTERM, shutdown);
