@@ -150,6 +150,7 @@ static void send_object_detection_event(const char* object_class,
  */
 static void declaration_complete(guint declaration, gpointer user_data) {
     syslog(LOG_INFO, "Declaration complete for: %d", declaration);
+    ((void)user_data);  // Suppress "unused parameter" warning
 
     // Mark declaration as complete so we can start sending events
     event_system->declaration_complete = TRUE;
