@@ -108,24 +108,23 @@ static guint setup_object_detection_event(AXEventHandler* event_handler) {
                                          AX_VALUE_TYPE_STRING,
                                          NULL);
 
-    // Add data elements as placeholders (actual values sent with each event)
-    gchar* empty_string = "";
+    // Add data elements as placeholders - fix the parameter order
     ax_event_key_value_set_add_key_value(key_value_set,
                                          "ObjectClass",
                                          NULL,
-                                         empty_string,
+                                         "",  // Empty initial value
                                          AX_VALUE_TYPE_STRING,
                                          NULL);
     ax_event_key_value_set_add_key_value(key_value_set,
                                          "Confidence",
                                          NULL,
-                                         empty_string,
+                                         "",  // Empty initial value
                                          AX_VALUE_TYPE_STRING,
                                          NULL);
     ax_event_key_value_set_add_key_value(key_value_set,
                                          "BoundingBox",
                                          NULL,
-                                         empty_string,
+                                         "",  // Empty initial value
                                          AX_VALUE_TYPE_STRING,
                                          NULL);
 
@@ -174,7 +173,6 @@ static void send_object_detection_event(event_system_t* event_sys,
                                         float x2,
                                         float y2) {
     AXEventKeyValueSet* key_value_set = NULL;
-    AXEvent* event                    = NULL;
     GError* error                     = NULL;
 
     if (!event_sys || !event_sys->event_handler || event_sys->declaration_id == 0) {
@@ -213,16 +211,17 @@ static void send_object_detection_event(event_system_t* event_sys,
                                          AX_VALUE_TYPE_STRING,
                                          NULL);
 
-    // Create the event
-    event = ax_event_new2(key_value_set, NULL);
-
-    // Send the event
+    // Send the event using the simpler method (like in send_event example)
     if (!ax_event_handler_send_event(event_sys->event_handler,
-                                     event_sys->declaration_id,
-                                     event,
+                                     key_value_set,
+                                     &event_sys->declaration_id,
                                      &error)) {
-        syslog(LOG_ERR, "Failed to send object detection event: %s", error->message);
-        g_error_free(error);
+        syslog(LOG_ERR,
+               "Failed to send object detection event: %s",
+               error ? error->message : "Unknown error");
+        if (error) {
+            g_error_free(error);
+        }
     } else {
         syslog(LOG_INFO,
                "Event sent: %s (%.2f) at [%.3f,%.3f,%.3f,%.3f]",
@@ -235,7 +234,6 @@ static void send_object_detection_event(event_system_t* event_sys,
     }
 
     // Cleanup
-    ax_event_free(event);
     ax_event_key_value_set_free(key_value_set);
 }
 
@@ -686,7 +684,15 @@ int main(int argc, char** argv) {
 
             // Send object detection event
             if (event_sys && event_sys->declaration_id != 0) {
-                syslog(LOG_INFO, "Sending object detection event");
+                syslog(LOG_INFO,
+                       "Attempting to send event for %s (confidence: %.2f)",
+                       labels[label_idx],
+                       highest_class_likelihood);
+                syslog(LOG_INFO,
+                       "Event system: handler=%p, declaration_id=%u",
+                       event_sys->event_handler,
+                       event_sys->declaration_id);
+
                 send_object_detection_event(event_sys,
                                             labels[label_idx],
                                             highest_class_likelihood,
@@ -694,7 +700,14 @@ int main(int argc, char** argv) {
                                             y1,
                                             x2,
                                             y2);
-                syslog(LOG_INFO, "Event sent.");
+            } else {
+                syslog(LOG_WARNING, "Event system not properly initialized - skipping event");
+                if (event_sys) {
+                    syslog(LOG_WARNING,
+                           "Event system details: handler=%p, declaration_id=%u",
+                           event_sys->event_handler,
+                           event_sys->declaration_id);
+                }
             }
 
             // No need to compensate for rotation since bbox will handle this
