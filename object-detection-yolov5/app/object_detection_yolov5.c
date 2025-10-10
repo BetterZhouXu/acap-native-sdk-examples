@@ -244,6 +244,7 @@ static guint setup_object_detection_declaration(AXEventHandler* event_handler) {
                                                 NULL);
 
     // Declare event (like send_event.c)
+    syslog(LOG_INFO, "Declaring object detection event");
     if (!ax_event_handler_declare(
             event_handler,
             key_value_set,
@@ -255,6 +256,9 @@ static guint setup_object_detection_declaration(AXEventHandler* event_handler) {
         syslog(LOG_WARNING, "Could not declare object detection event: %s", error->message);
         g_error_free(error);
     }
+    syslog(LOG_INFO,
+           "Declared object detection event, status of declaration_complete=%d",
+           event_system->declaration_complete);
 
     // The key/value set is no longer needed (like send_event.c)
     ax_event_key_value_set_free(key_value_set);
@@ -274,6 +278,9 @@ static void initialize_event_system(void) {
 
     // Setup declaration (like send_event.c)
     event_system->event_id = setup_object_detection_declaration(event_system->event_handler);
+    syslog(LOG_INFO,
+           "Initialized object detection event system: event_id=%u",
+           event_system->event_id);
 }
 
 /**
@@ -483,6 +490,19 @@ int main(int argc, char** argv) {
     bbox_t* bbox                          = NULL;
 
     initialize_event_system();
+
+    // 🟡 Wait for the event declaration to complete before proceeding
+    int wait_counter = 0;
+    while (!event_system->declaration_complete && wait_counter < 10) {
+        syslog(LOG_INFO, "Waiting for event declaration to complete...");
+        usleep(100000);  // wait 100ms
+        wait_counter++;
+    }
+
+    if (!event_system->declaration_complete) {
+        syslog(LOG_ERR, "Event declaration did not complete. Exiting.");
+        return 1;
+    }
 
     // Stop main loop at signal
     signal(SIGTERM, shutdown);
