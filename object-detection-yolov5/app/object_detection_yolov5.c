@@ -83,12 +83,18 @@ static void send_object_detection_event(const char* object_class,
                                         float y2) {
     AXEventKeyValueSet* key_value_set = NULL;
     AXEvent* event                    = NULL;
+    GError* error                     = NULL;
 
     // Only send if declaration is complete
-    if (!event_system) {
-        syslog(LOG_WARNING, "Event declaration not complete, skipping event");
+    if (!event_system || !event_system->declaration_complete) {
+        syslog(LOG_WARNING,
+               "Event system not ready: system=%p, complete=%d",
+               event_system,
+               event_system ? event_system->declaration_complete : -1);
         return;
     }
+
+    syslog(LOG_INFO, "📤 Sending event for %s", object_class);
 
     // Create key-value set (like send_event.c)
     key_value_set = ax_event_key_value_set_new();
@@ -134,12 +140,16 @@ static void send_object_detection_event(const char* object_class,
     ax_event_key_value_set_free(key_value_set);
 
     // Send the event (like send_event.c)
-    ax_event_handler_send_event(event_system->event_handler, event_system->event_id, event, NULL);
-
-    syslog(LOG_INFO,
-           "Send object detection event: %s (confidence: %.2f)",
-           object_class,
-           confidence);
+    if (!ax_event_handler_send_event(event_system->event_handler,
+                                     event_system->event_id,
+                                     event,
+                                     &error)) {
+        syslog(LOG_ERR, "❌ Failed to send event: %s", error ? error->message : "Unknown error");
+        if (error)
+            g_error_free(error);
+    } else {
+        syslog(LOG_INFO, "✅ Successfully sent event: %s", object_class);
+    }
 
     // Free the event (like send_event.c)
     ax_event_free(event);
