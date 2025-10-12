@@ -101,36 +101,45 @@ static void send_object_detection_event(const char* object_class,
 
     // Add the variable elements of the event to the set (following send_event.c pattern)
     syslog(LOG_INFO, "Add ObjectClass: %s", object_class);
-    ax_event_key_value_set_add_key_value(key_value_set,
-                                         "ObjectClass",
-                                         NULL,
-                                         &object_class,
-                                         AX_VALUE_TYPE_STRING,
-                                         NULL);
+    if (!ax_event_key_value_set_add_key_value(key_value_set,
+                                              "ObjectClass",
+                                              NULL,
+                                              &object_class,
+                                              AX_VALUE_TYPE_STRING,
+                                              NULL)) {
+        syslog(LOG_ERR, "❌ Failed to add ObjectClass to event");
+        return;
+    }
 
     // Add confidence
     char confidence_str[32];
     snprintf(confidence_str, sizeof(confidence_str), "%.2f", confidence);
     const char* conf_ptr = confidence_str;
     syslog(LOG_INFO, "Add Confidence: %s", confidence_str);
-    ax_event_key_value_set_add_key_value(key_value_set,
-                                         "Confidence",
-                                         NULL,
-                                         &conf_ptr,
-                                         AX_VALUE_TYPE_STRING,
-                                         NULL);
+    if (!ax_event_key_value_set_add_key_value(key_value_set,
+                                              "Confidence",
+                                              NULL,
+                                              &conf_ptr,
+                                              AX_VALUE_TYPE_STRING,
+                                              NULL)) {
+        syslog(LOG_ERR, "❌ Failed to add Confidence to event");
+        return;
+    }
 
     // Add bounding box
     char bbox_str[128];
     snprintf(bbox_str, sizeof(bbox_str), "%.3f,%.3f,%.3f,%.3f", x1, y1, x2, y2);
     const char* bbox_ptr = bbox_str;
     syslog(LOG_INFO, "Add BoundingBox: %s", bbox_str);
-    ax_event_key_value_set_add_key_value(key_value_set,
-                                         "BoundingBox",
-                                         NULL,
-                                         &bbox_ptr,
-                                         AX_VALUE_TYPE_STRING,
-                                         NULL);
+    if (!ax_event_key_value_set_add_key_value(key_value_set,
+                                              "BoundingBox",
+                                              NULL,
+                                              &bbox_ptr,
+                                              AX_VALUE_TYPE_STRING,
+                                              NULL)) {
+        syslog(LOG_ERR, "❌ Failed to add BoundingBox to event");
+        return;
+    }
 
     // Create the event (like send_event.c)
     // Use ax_event_new2 since ax_event_new is deprecated from 3.2
