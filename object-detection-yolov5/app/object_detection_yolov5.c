@@ -259,6 +259,10 @@ static guint setup_object_detection_declaration(AXEventHandler* event_handler) {
         syslog(LOG_WARNING, "Could not declare object detection event: %s", error->message);
         g_error_free(error);
     }
+
+    if (error) {
+        panic("Failed to declare event: %s", error->message);
+    }
     syslog(LOG_INFO, "Declared object detection event inside setup_object_detection_declaration");
 
     // The key/value set is no longer needed (like send_event.c)
