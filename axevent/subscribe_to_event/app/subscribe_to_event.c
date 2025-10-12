@@ -41,7 +41,7 @@
  */
 static void subscription_callback(guint subscription, AXEvent* event, guint* token) {
     const AXEventKeyValueSet* key_value_set;
-    gdouble value = 0;
+    const gchar* string_value = NULL;
 
     // The subscription id is not used in this example
     (void)subscription;
@@ -53,10 +53,10 @@ static void subscription_callback(guint subscription, AXEvent* event, guint* tok
     key_value_set = ax_event_get_key_value_set(event);
 
     // Get the Value of the Processor Usage
-    ax_event_key_value_set_get_double(key_value_set, "Value", NULL, &value, NULL);
+    ax_event_key_value_set_get_string(key_value_set, "ObjectClass", NULL, &string_value, NULL);
 
     // Print a helpful message
-    syslog(LOG_INFO, "Received event with value: %lf", value);
+    syslog(LOG_INFO, "Received event with string value: %s", string_value ? string_value : "NULL");
 
     /*
      * Free the received event, n.b. AXEventKeyValueSet should not be freed
@@ -87,13 +87,13 @@ static guint onviftrigger_subscription(AXEventHandler* event_handler, guint* tok
     ax_event_key_value_set_add_key_value(key_value_set,
                                          "topic0",
                                          "tns1",
-                                         "Monitoring",
+                                         "VideoAnalytics",
                                          AX_VALUE_TYPE_STRING,
                                          NULL);
     ax_event_key_value_set_add_key_value(key_value_set,
                                          "topic1",
                                          "tns1",
-                                         "ProcessorUsage",
+                                         "ObjectDetected",
                                          AX_VALUE_TYPE_STRING,
                                          NULL);
 
