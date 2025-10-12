@@ -41,7 +41,7 @@
  */
 static void subscription_callback(guint subscription, AXEvent* event, guint* token) {
     const AXEventKeyValueSet* key_value_set;
-    const gchar* string_value = NULL;
+    gchar* string_value = NULL;
 
     // The subscription id is not used in this example
     (void)subscription;
