@@ -66,6 +66,7 @@ static void shutdown(int status) {
 typedef struct {
     AXEventHandler* event_handler;
     guint event_id;
+    gboolean declaration_complete;
 } EventSystem;
 
 static EventSystem* event_system = NULL;
@@ -153,10 +154,10 @@ static void declaration_complete(guint declaration, gpointer user_data) {
     ((void)user_data);  // Suppress "unused parameter" warning
 
     // Mark declaration as complete so we can start sending events
-    // event_system->declaration_complete = TRUE;
-    // syslog(LOG_INFO,
-    //        "Event declaration marked as complete, status of declaration_complete=%d",
-    //        event_system->declaration_complete);
+    event_system->declaration_complete = TRUE;
+    syslog(LOG_INFO,
+           "Event declaration marked as complete, status of declaration_complete=%d",
+           event_system->declaration_complete);
 
     // Note: Unlike send_event.c, we don't set up a timer here
     // We'll send events immediately when objects are detected
@@ -260,9 +261,6 @@ static guint setup_object_detection_declaration(AXEventHandler* event_handler) {
         g_error_free(error);
     }
 
-    if (error) {
-        panic("Failed to declare event: %s", error->message);
-    }
     syslog(LOG_INFO, "Declared object detection event inside setup_object_detection_declaration");
 
     // The key/value set is no longer needed (like send_event.c)
@@ -277,8 +275,9 @@ static void initialize_event_system(void) {
     syslog(LOG_INFO, "Initializing object detection event system");
 
     // Allocate event system (like send_event.c allocates app_data)
-    event_system                = calloc(1, sizeof(EventSystem));
-    event_system->event_handler = ax_event_handler_new();
+    event_system                       = calloc(1, sizeof(EventSystem));
+    event_system->event_handler        = ax_event_handler_new();
+    event_system->declaration_complete = FALSE;
 
     // Setup declaration (like send_event.c)
     event_system->event_id = setup_object_detection_declaration(event_system->event_handler);
@@ -486,6 +485,13 @@ static void determine_bbox_coordinates(uint8_t* tensor,
     find_corners(x, y, w, h, x1, y1, x2, y2);
 }
 
+static void process_glib_events(void) {
+    GMainContext* context = g_main_context_default();
+    while (g_main_context_pending(context)) {
+        g_main_context_iteration(context, FALSE);
+    }
+}
+
 int main(int argc, char** argv) {
     g_autoptr(GError) vdo_error           = NULL;
     img_provider_t* image_provider        = NULL;
@@ -494,6 +500,16 @@ int main(int argc, char** argv) {
     bbox_t* bbox                          = NULL;
 
     initialize_event_system();
+
+    syslog(LOG_INFO, "Processing events to complete declaration...");
+    for (int i = 0; i < 30; i++) {  // Wait up to 3 seconds
+        process_glib_events();      // This will execute your declaration_complete callback
+        usleep(100000);             // 100ms
+
+        // Optional: Check if you want to add completion flag
+        if (event_system->declaration_complete)
+            break;
+    }
 
     // Stop main loop at signal
     signal(SIGTERM, shutdown);
@@ -757,6 +773,7 @@ int main(int argc, char** argv) {
                                         y1,
                                         x2,
                                         y2);
+            process_glib_events();
         }
 
         if (!bbox_commit(bbox, 0u)) {
