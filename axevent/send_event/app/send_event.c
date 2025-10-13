@@ -71,6 +71,7 @@ static gboolean send_event(AppData* send_data) {
     ax_event_handler_send_event(send_data->event_handler, send_data->event_id, event, NULL);
 
     syslog(LOG_INFO, "Send stateful event with value: %lf", send_data->value);
+    syslog(LOG_INFO, "event id: %u", send_data->event_id);
 
     ax_event_free(event);
 
