@@ -71,6 +71,29 @@ typedef struct {
 
 static EventSystem* event_system = NULL;
 
+static char* compose_detection_result(const char* object_class,
+                                      float confidence,
+                                      float x1,
+                                      float y1,
+                                      float x2,
+                                      float y2) {
+    char* json_string = malloc(512);
+    if (!json_string)
+        return NULL;
+
+    snprintf(json_string,
+             512,
+             "{\"class\":\"%s\",\"confidence\":%.3f,\"bbox\":[%.3f,%.3f,%.3f,%.3f]}",
+             object_class,
+             confidence,
+             x1,
+             y1,
+             x2,
+             y2);
+
+    return json_string;
+}
+
 /**
  * Send object detection event immediately when object is detected.
  * Following the exact pattern from send_event.c
@@ -99,45 +122,23 @@ static void send_object_detection_event(const char* object_class,
     // Create key-value set (like send_event.c)
     key_value_set = ax_event_key_value_set_new();
 
-    // Add the variable elements of the event to the set (following send_event.c pattern)
-    syslog(LOG_INFO, "Add ObjectClass: %s", object_class);
-    if (!ax_event_key_value_set_add_key_value(key_value_set,
-                                              "ObjectClass",
-                                              NULL,
-                                              &object_class,
-                                              AX_VALUE_TYPE_STRING,
-                                              NULL)) {
-        syslog(LOG_ERR, "❌ Failed to add ObjectClass to event");
+    const char* detection_result =
+        compose_detection_result(object_class, confidence, x1, y1, x2, y2);
+    if (!detection_result) {
+        syslog(LOG_ERR, "❌ Failed to compose detection result JSON");
         return;
     }
 
-    // Add confidence
-    char confidence_str[32];
-    snprintf(confidence_str, sizeof(confidence_str), "%.2f", confidence);
-    const char* conf_ptr = confidence_str;
-    syslog(LOG_INFO, "Add Confidence: %s", confidence_str);
+    // Add detection result
+    syslog(LOG_INFO, "Add Result: %s", detection_result);
     if (!ax_event_key_value_set_add_key_value(key_value_set,
-                                              "Confidence",
+                                              "Result",
                                               NULL,
-                                              &conf_ptr,
+                                              &detection_result,
                                               AX_VALUE_TYPE_STRING,
                                               NULL)) {
-        syslog(LOG_ERR, "❌ Failed to add Confidence to event");
-        return;
-    }
-
-    // Add bounding box
-    char bbox_str[128];
-    snprintf(bbox_str, sizeof(bbox_str), "%.3f,%.3f,%.3f,%.3f", x1, y1, x2, y2);
-    const char* bbox_ptr = bbox_str;
-    syslog(LOG_INFO, "Add BoundingBox: %s", bbox_str);
-    if (!ax_event_key_value_set_add_key_value(key_value_set,
-                                              "BoundingBox",
-                                              NULL,
-                                              &bbox_ptr,
-                                              AX_VALUE_TYPE_STRING,
-                                              NULL)) {
-        syslog(LOG_ERR, "❌ Failed to add BoundingBox to event");
+        syslog(LOG_ERR, "❌ Failed to add Result to event");
+        free((void*)detection_result);
         return;
     }
 
@@ -158,6 +159,7 @@ static void send_object_detection_event(const char* object_class,
             g_error_free(error);
     } else {
         syslog(LOG_INFO, "✅ Successfully sent event: %s", object_class);
+        syslog(LOG_INFO, "event id is %d", event_system->event_id);
     }
 
     // Free the event (like send_event.c)
@@ -220,19 +222,7 @@ static guint setup_object_detection_declaration(AXEventHandler* event_handler) {
     // Add data elements with empty initial values
     const char* empty_string = "";
     ax_event_key_value_set_add_key_value(key_value_set,
-                                         "ObjectClass",
-                                         NULL,
-                                         &empty_string,
-                                         AX_VALUE_TYPE_STRING,
-                                         NULL);
-    ax_event_key_value_set_add_key_value(key_value_set,
-                                         "Confidence",
-                                         NULL,
-                                         &empty_string,
-                                         AX_VALUE_TYPE_STRING,
-                                         NULL);
-    ax_event_key_value_set_add_key_value(key_value_set,
-                                         "BoundingBox",
+                                         "Result",
                                          NULL,
                                          &empty_string,
                                          AX_VALUE_TYPE_STRING,
@@ -247,21 +237,9 @@ static guint setup_object_detection_declaration(AXEventHandler* event_handler) {
                                                 NULL);
 
     // Mark data elements (like send_event.c marks "Value")
-    ax_event_key_value_set_mark_as_data(key_value_set, "ObjectClass", NULL, NULL);
+    ax_event_key_value_set_mark_as_data(key_value_set, "Result", NULL, NULL);
     ax_event_key_value_set_mark_as_user_defined(key_value_set,
-                                                "ObjectClass",
-                                                NULL,
-                                                "wstype:xs:string",
-                                                NULL);
-    ax_event_key_value_set_mark_as_data(key_value_set, "Confidence", NULL, NULL);
-    ax_event_key_value_set_mark_as_user_defined(key_value_set,
-                                                "Confidence",
-                                                NULL,
-                                                "wstype:xs:string",
-                                                NULL);
-    ax_event_key_value_set_mark_as_data(key_value_set, "BoundingBox", NULL, NULL);
-    ax_event_key_value_set_mark_as_user_defined(key_value_set,
-                                                "BoundingBox",
+                                                "Result",
                                                 NULL,
                                                 "wstype:xs:string",
                                                 NULL);
