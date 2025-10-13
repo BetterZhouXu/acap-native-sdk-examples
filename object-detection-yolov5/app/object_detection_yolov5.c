@@ -249,7 +249,7 @@ static guint setup_object_detection_declaration(AXEventHandler* event_handler) {
     if (!ax_event_handler_declare(
             event_handler,
             key_value_set,
-            TRUE,  // TRUE for stateless events (unlike send_event.c which uses FALSE for stateful)
+            FALSE,  // TRUE for stateless events (unlike send_event.c which uses FALSE for stateful)
             &declaration,
             (AXDeclarationCompleteCallback)declaration_complete,
             NULL,  // No user data needed
