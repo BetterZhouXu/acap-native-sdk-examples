@@ -730,7 +730,7 @@ int main(int argc, char** argv) {
     bbox_t* bbox                          = NULL;
 
     // All your initialization code...
-    model_params_t* model_params = (model_params_t*)malloc(sizeof(model_params_t));
+    model_params = (model_params_t*)malloc(sizeof(model_params_t));
     if (model_params == NULL) {
         panic("%s: Unable to allocate model_params_t: %s", __func__, strerror(errno));
     }
