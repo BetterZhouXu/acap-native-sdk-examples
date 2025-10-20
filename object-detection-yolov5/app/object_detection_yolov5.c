@@ -65,6 +65,16 @@ typedef struct {
     guint detection_timer;
 } EventSystem;
 
+typedef struct model_params {
+    int input_width;
+    int input_height;
+    float quantization_scale;
+    float quantization_zero_point;
+    int num_classes;
+    int num_detections;
+    int size_per_detection;
+} model_params_t;
+
 static EventSystem* event_system = NULL;
 static GMainLoop* main_loop      = NULL;
 
@@ -504,16 +514,6 @@ static void cleanup_event_system(void) {
         event_system = NULL;
     }
 }
-
-typedef struct model_params {
-    int input_width;
-    int input_height;
-    float quantization_scale;
-    float quantization_zero_point;
-    int num_classes;
-    int num_detections;
-    int size_per_detection;
-} model_params_t;
 
 static int ax_parameter_get_int(AXParameter* handle, const char* name) {
     gchar* str_value = NULL;
