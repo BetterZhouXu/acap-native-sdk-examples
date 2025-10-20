@@ -58,8 +58,19 @@
 volatile sig_atomic_t running = 1;
 
 static void shutdown(int status) {
-    (void)status;
+    syslog(LOG_INFO, "Received signal %d, shutting down", status);
     running = 0;
+
+    // Stop detection timer
+    if (event_system && event_system->detection_timer > 0) {
+        g_source_remove(event_system->detection_timer);
+        event_system->detection_timer = 0;
+    }
+
+    // Quit main loop
+    if (main_loop) {
+        g_main_loop_quit(main_loop);
+    }
 }
 
 // Event system structure (following send_event.c pattern)
@@ -67,9 +78,190 @@ typedef struct {
     AXEventHandler* event_handler;
     guint event_id;
     gboolean declaration_complete;
+    guint detection_timer;
 } EventSystem;
 
 static EventSystem* event_system = NULL;
+static GMainLoop* main_loop      = NULL;
+
+static gboolean detection_timer_callback(gpointer user_data) {
+    // Move all your detection code here (from the while loop)
+    // This will be called periodically by GLib
+
+    if (!running) {
+        syslog(LOG_INFO, "Stopping detection timer");
+        return FALSE;  // Stop the timer
+    }
+
+    // Your existing detection code goes here (from line ~480 onwards)
+    struct timeval start_ts, end_ts;
+    unsigned int preprocessing_ms = 0;
+    unsigned int inference_ms     = 0;
+    unsigned int total_elapsed_ms = 0;
+
+    // Get the necessary variables from user_data
+    typedef struct {
+        img_provider_t* image_provider;
+        model_provider_t* model_provider;
+        model_tensor_output_t* tensor_outputs;
+        size_t number_output_tensors;
+        bbox_t* bbox;
+        char** labels;
+        model_params_t* model_params;
+        int* invalid_detections;
+        float conf_threshold;
+        float iou_threshold;
+    } detection_data_t;
+
+    detection_data_t* data = (detection_data_t*)user_data;
+
+    g_autoptr(GError) vdo_error  = NULL;
+    g_autoptr(VdoBuffer) vdo_buf = img_provider_get_frame(data->image_provider);
+
+    if (!vdo_buf) {
+        syslog(LOG_INFO,
+               "No buffer because of changed global rotation. Application needs to be restarted");
+        running = 0;
+        return FALSE;
+    }
+
+    // All your existing detection processing code...
+    gettimeofday(&start_ts, NULL);
+    if (!model_run_preprocessing(data->model_provider, vdo_buf)) {
+        if (!vdo_stream_buffer_unref(data->image_provider->vdo_stream, &vdo_buf, &vdo_error)) {
+            if (!vdo_error_is_expected(&vdo_error)) {
+                syslog(LOG_ERR, "Unexpected error: %s", vdo_error->message);
+            }
+            g_clear_error(&vdo_error);
+        }
+        img_provider_flush_all_frames(data->image_provider);
+        return TRUE;  // Continue running
+    }
+    gettimeofday(&end_ts, NULL);
+
+    preprocessing_ms = elapsed_ms(&start_ts, &end_ts);
+    syslog(LOG_INFO, "Ran pre-processing for %u ms", preprocessing_ms);
+
+    gettimeofday(&start_ts, NULL);
+    if (!model_run_inference(data->model_provider, vdo_buf)) {
+        if (!vdo_stream_buffer_unref(data->image_provider->vdo_stream, &vdo_buf, &vdo_error)) {
+            if (!vdo_error_is_expected(&vdo_error)) {
+                syslog(LOG_ERR, "Unexpected error: %s", vdo_error->message);
+            }
+            g_clear_error(&vdo_error);
+        }
+        img_provider_flush_all_frames(data->image_provider);
+        return TRUE;
+    }
+    gettimeofday(&end_ts, NULL);
+
+    inference_ms = elapsed_ms(&start_ts, &end_ts);
+    syslog(LOG_INFO, "Ran inference for %u ms", inference_ms);
+
+    total_elapsed_ms = inference_ms + preprocessing_ms;
+    img_provider_update_framerate(data->image_provider, total_elapsed_ms);
+
+    // Get tensor outputs
+    for (size_t i = 0; i < data->number_output_tensors; i++) {
+        if (!model_get_tensor_output_info(data->model_provider, i, &data->tensor_outputs[i])) {
+            syslog(LOG_ERR, "Failed to get output tensor info for %zu", i);
+            return TRUE;
+        }
+    }
+
+    uint8_t* tensor_data = data->tensor_outputs[0].data;
+
+    gettimeofday(&start_ts, NULL);
+    filter_detections(tensor_data,
+                      data->conf_threshold,
+                      data->iou_threshold,
+                      data->model_params,
+                      data->invalid_detections);
+    gettimeofday(&end_ts, NULL);
+    syslog(LOG_INFO, "Ran parsing for %u ms", elapsed_ms(&start_ts, &end_ts));
+
+    bbox_clear(data->bbox);
+
+    int valid_detection_count = 0;
+    int size_per_detection    = data->model_params->size_per_detection;
+    float qt_zero_point       = data->model_params->quantization_zero_point;
+    float qt_scale            = data->model_params->quantization_scale;
+
+    // Process detections
+    for (int i = 0; i < data->model_params->num_detections; i++) {
+        if (data->invalid_detections[i] == 1) {
+            continue;
+        }
+
+        valid_detection_count++;
+
+        float highest_class_likelihood = 0.0;
+        int label_idx                  = 0;
+        float object_likelihood        = 0.0;
+
+        determine_class_and_object_likelihood(tensor_data,
+                                              i,
+                                              size_per_detection,
+                                              qt_zero_point,
+                                              qt_scale,
+                                              &highest_class_likelihood,
+                                              &label_idx,
+                                              &object_likelihood);
+
+        syslog(LOG_INFO,
+               "Object %d: Label=%s, Object Likelihood=%.2f, Class Likelihood=%.2f",
+               valid_detection_count,
+               data->labels[label_idx],
+               object_likelihood,
+               highest_class_likelihood);
+
+        float x1, y1, x2, y2;
+        determine_bbox_coordinates(tensor_data,
+                                   i,
+                                   size_per_detection,
+                                   qt_zero_point,
+                                   qt_scale,
+                                   &x1,
+                                   &y1,
+                                   &x2,
+                                   &y2);
+        syslog(LOG_INFO, "Bounding Box: [%.2f, %.2f, %.2f, %.2f]", x1, y1, x2, y2);
+
+        bbox_coordinates_frame_normalized(data->bbox);
+        bbox_rectangle(data->bbox, x1, y1, x2, y2);
+
+        syslog(LOG_INFO,
+               "Detected %s with confidence %.2f at (%.2f, %.2f, %.2f, %.2f)",
+               data->labels[label_idx],
+               highest_class_likelihood,
+               x1,
+               y1,
+               x2,
+               y2);
+
+        // Send object detection event
+        send_object_detection_event(data->labels[label_idx],
+                                    highest_class_likelihood,
+                                    x1,
+                                    y1,
+                                    x2,
+                                    y2);
+    }
+
+    if (!bbox_commit(data->bbox, 0u)) {
+        syslog(LOG_ERR, "Failed to commit box drawer");
+    }
+
+    // Unref the buffer
+    if (!vdo_stream_buffer_unref(data->image_provider->vdo_stream, &vdo_buf, &vdo_error)) {
+        if (!vdo_error_is_expected(&vdo_error)) {
+            syslog(LOG_ERR, "Unexpected error: %s", vdo_error->message);
+        }
+        g_clear_error(&vdo_error);
+    }
+
+    return TRUE;  // Continue running the timer
+}
 
 static char* compose_detection_result(const char* object_class,
                                       float confidence,
@@ -172,16 +364,31 @@ static void send_object_detection_event(const char* object_class,
  */
 static void declaration_complete(guint declaration, gpointer user_data) {
     syslog(LOG_INFO, "Declaration complete for: %d", declaration);
-    ((void)user_data);  // Suppress "unused parameter" warning
 
-    // Mark declaration as complete so we can start sending events
     event_system->declaration_complete = TRUE;
     syslog(LOG_INFO,
            "Event declaration marked as complete, status of declaration_complete=%d",
            event_system->declaration_complete);
 
-    // Note: Unlike send_event.c, we don't set up a timer here
-    // We'll send events immediately when objects are detected
+    // Start detection timer when declaration is complete
+    typedef struct {
+        img_provider_t* image_provider;
+        model_provider_t* model_provider;
+        model_tensor_output_t* tensor_outputs;
+        size_t number_output_tensors;
+        bbox_t* bbox;
+        char** labels;
+        model_params_t* model_params;
+        int* invalid_detections;
+        float conf_threshold;
+        float iou_threshold;
+    } detection_data_t;
+
+    detection_data_t* detection_data = (detection_data_t*)user_data;
+
+    // Start detection timer - run every 500ms (about 2 FPS)
+    event_system->detection_timer = g_timeout_add(500, detection_timer_callback, detection_data);
+    syslog(LOG_INFO, "Detection timer started (timer ID: %u)", event_system->detection_timer);
 }
 
 /**
@@ -482,54 +689,31 @@ static void determine_bbox_coordinates(uint8_t* tensor,
     find_corners(x, y, w, h, x1, y1, x2, y2);
 }
 
-static void process_glib_events(void) {
-    GMainContext* context = g_main_context_default();
-    while (g_main_context_pending(context)) {
-        g_main_context_iteration(context, FALSE);
-    }
-}
-
 int main(int argc, char** argv) {
-    g_autoptr(GError) vdo_error           = NULL;
-    img_provider_t* image_provider        = NULL;
-    model_provider_t* model_provider      = NULL;
-    model_tensor_output_t* tensor_outputs = NULL;
-    bbox_t* bbox                          = NULL;
-
+    // Initialize event system first
     initialize_event_system();
 
-    syslog(LOG_INFO, "Processing events to complete declaration...");
-    for (int i = 0; i < 30; i++) {  // Wait up to 3 seconds
-        process_glib_events();      // This will execute your declaration_complete callback
-        usleep(100000);             // 100ms
-
-        // Optional: Check if you want to add completion flag
-        if (event_system->declaration_complete)
-            break;
-    }
-
-    // Stop main loop at signal
+    // Signal handlers
     signal(SIGTERM, shutdown);
     signal(SIGINT, shutdown);
 
     args_t args;
     parse_args(argc, argv, &args);
 
+    // All your initialization code...
     model_params_t* model_params = (model_params_t*)malloc(sizeof(model_params_t));
     if (model_params == NULL) {
         panic("%s: Unable to allocate model_params_t: %s", __func__, strerror(errno));
     }
 
-    // Comes from model_params.h
+    // Set up model parameters
     model_params->input_width             = MODEL_INPUT_WIDTH;
     model_params->input_height            = MODEL_INPUT_HEIGHT;
     model_params->quantization_scale      = QUANTIZATION_SCALE;
     model_params->quantization_zero_point = QUANTIZATION_ZERO_POINT;
     model_params->num_classes             = NUM_CLASSES;
     model_params->num_detections          = NUM_DETECTIONS;
-    model_params->size_per_detection =
-        5 + NUM_CLASSES;  // Each detection consists of [x, y, w, h, object_likelihood,
-                          // class1_likelihood, class2_likelihood, class3_likelihood, ... ]
+    model_params->size_per_detection      = 5 + NUM_CLASSES;
 
     syslog(LOG_INFO,
            "Model input size w/h: %d x %d",
@@ -540,9 +724,9 @@ int main(int argc, char** argv) {
     syslog(LOG_INFO, "Number of classes: %d", model_params->num_classes);
     syslog(LOG_INFO, "Number of detections: %d", model_params->num_detections);
 
-    int invalid_detections[model_params->num_detections];
+    int* invalid_detections = calloc(model_params->num_detections, sizeof(int));
 
-    // Create a new axparameter instance
+    // Get parameters
     GError* axparameter_error       = NULL;
     AXParameter* axparameter_handle = ax_parameter_new(APP_NAME, &axparameter_error);
     if (axparameter_handle == NULL) {
@@ -551,18 +735,16 @@ int main(int argc, char** argv) {
 
     float conf_threshold = ax_parameter_get_int(axparameter_handle, "ConfThresholdPercent") / 100.0;
     float iou_threshold  = ax_parameter_get_int(axparameter_handle, "IouThresholdPercent") / 100.0;
-
     ax_parameter_free(axparameter_handle);
 
+    // Set up image and model providers (your existing code)
     VdoFormat vdo_format = VDO_FORMAT_YUV;
     double vdo_framerate = 30.0;
 
     if (!g_strcmp0(args.device_name, "a9-dlpu-tflite")) {
-        // Possible to run RGB on ARTPEC-9
         vdo_format = VDO_FORMAT_RGB;
     }
 
-    // Choose a valid stream resolution since only certain resolutions are allowed
     unsigned int stream_width  = 0;
     unsigned int stream_height = 0;
     if (!choose_stream_resolution(model_params->input_width,
@@ -573,43 +755,45 @@ int main(int argc, char** argv) {
                                   &stream_width,
                                   &stream_height)) {
         syslog(LOG_ERR, "%s: Failed choosing stream resolution", __func__);
-        goto end;
+        goto cleanup;
     }
+
     syslog(LOG_INFO,
            "Creating VDO image provider and creating stream %u x %u",
            stream_width,
            stream_height);
 
-    image_provider = create_img_provider(stream_width, stream_height, 2, vdo_format, vdo_framerate);
+    img_provider_t* image_provider =
+        create_img_provider(stream_width, stream_height, 2, vdo_format, vdo_framerate);
     if (!image_provider) {
         panic("%s: Could not create image provider", __func__);
     }
 
-    size_t number_output_tensors = 0;
-    model_provider               = create_model_provider(model_params->input_width,
-                                           model_params->input_height,
-                                           image_provider->width,
-                                           image_provider->height,
-                                           image_provider->pitch,
-                                           image_provider->format,
-                                           VDO_FORMAT_RGB,
-                                           args.model_file,
-                                           args.device_name,
-                                           false,
-                                           &number_output_tensors);
+    size_t number_output_tensors     = 0;
+    model_provider_t* model_provider = create_model_provider(model_params->input_width,
+                                                             model_params->input_height,
+                                                             image_provider->width,
+                                                             image_provider->height,
+                                                             image_provider->pitch,
+                                                             image_provider->format,
+                                                             VDO_FORMAT_RGB,
+                                                             args.model_file,
+                                                             args.device_name,
+                                                             false,
+                                                             &number_output_tensors);
     if (!model_provider) {
         panic("%s: Could not create model provider", __func__);
     }
-    tensor_outputs = calloc(number_output_tensors, sizeof(model_tensor_output_t));
+
+    model_tensor_output_t* tensor_outputs =
+        calloc(number_output_tensors, sizeof(model_tensor_output_t));
     if (!tensor_outputs) {
         panic("%s: Could not allocate tensor outputs", __func__);
     }
 
-    char** labels = NULL;          // This is the array of label strings. The label
-                                   // entries points into the large label_file_data buffer.
-    size_t num_labels;             // Number of entries in the labels array.
-    char* label_file_data = NULL;  // Buffer holding the complete collection of label strings.
-
+    char** labels = NULL;
+    size_t num_labels;
+    char* label_file_data = NULL;
     parse_labels(&labels, &label_file_data, args.labels_file, &num_labels);
 
     syslog(LOG_INFO, "Start fetching video frames from VDO");
@@ -617,179 +801,58 @@ int main(int argc, char** argv) {
         panic("%s: Could not start image provider", __func__);
     }
 
-    bbox = setup_bbox();
+    bbox_t* bbox = setup_bbox();
 
-    int size_per_detection = model_params->size_per_detection;
-    float qt_zero_point    = model_params->quantization_zero_point;
-    float qt_scale         = model_params->quantization_scale;
+    // Prepare detection data for the timer callback
+    typedef struct {
+        img_provider_t* image_provider;
+        model_provider_t* model_provider;
+        model_tensor_output_t* tensor_outputs;
+        size_t number_output_tensors;
+        bbox_t* bbox;
+        char** labels;
+        model_params_t* model_params;
+        int* invalid_detections;
+        float conf_threshold;
+        float iou_threshold;
+    } detection_data_t;
 
-    // test send event right away
+    detection_data_t detection_data = {.image_provider        = image_provider,
+                                       .model_provider        = model_provider,
+                                       .tensor_outputs        = tensor_outputs,
+                                       .number_output_tensors = number_output_tensors,
+                                       .bbox                  = bbox,
+                                       .labels                = labels,
+                                       .model_params          = model_params,
+                                       .invalid_detections    = invalid_detections,
+                                       .conf_threshold        = conf_threshold,
+                                       .iou_threshold         = iou_threshold};
+
+    // Update the declaration to pass detection_data
+    // We need to modify setup_object_detection_declaration to accept user_data
+    // For now, we'll store it globally or update the callback
+
+    // Send test events immediately (before starting main loop)
     syslog(LOG_INFO, "Sending test object detection events");
     send_object_detection_event("TestObject1", 0.99, 0.1, 0.2, 0.3, 0.4);
     send_object_detection_event("TestObject2", 0.88, 0.1, 0.2, 0.3, 0.4);
     send_object_detection_event("TestObject3", 0.77, 0.1, 0.2, 0.3, 0.4);
 
-    while (running) {
-        struct timeval start_ts, end_ts;
-        unsigned int preprocessing_ms = 0;
-        unsigned int inference_ms     = 0;
-        unsigned int total_elapsed_ms = 0;
+    // Create and run GLib main loop
+    main_loop = g_main_loop_new(NULL, FALSE);
+    syslog(LOG_INFO, "Starting GLib main loop - detection will begin after declaration completes");
 
-        g_autoptr(VdoBuffer) vdo_buf = img_provider_get_frame(image_provider);
-        if (!vdo_buf) {
-            // This can only happen if it is global rotation then
-            // the stream has to be restarted because rotation has been changed.
-            syslog(
-                LOG_INFO,
-                "No buffer because of changed global rotation. Application needs to be restarted");
-            goto end;
-        }
-        // If needed convert and scale/crop to correct input format and resolution
-        // Its up to the model provider to decide if needed or not
-        // If not needed the model_run_preprocessing will return true without
-        // any work
-        gettimeofday(&start_ts, NULL);
-        if (!model_run_preprocessing(model_provider, vdo_buf)) {
-            // No power
-            if (!vdo_stream_buffer_unref(image_provider->vdo_stream, &vdo_buf, &vdo_error)) {
-                if (!vdo_error_is_expected(&vdo_error)) {
-                    panic("%s: Unexpexted error: %s", __func__, vdo_error->message);
-                }
-                g_clear_error(&vdo_error);
-            }
-            img_provider_flush_all_frames(image_provider);
-            continue;
-        }
-        gettimeofday(&end_ts, NULL);
+    // This blocks until g_main_loop_quit() is called
+    g_main_loop_run(main_loop);
 
-        preprocessing_ms = (unsigned int)(((end_ts.tv_sec - start_ts.tv_sec) * 1000) +
-                                          ((end_ts.tv_usec - start_ts.tv_usec) / 1000));
-        syslog(LOG_INFO, "Ran pre-processing for %u ms", preprocessing_ms);
+cleanup:
+    syslog(LOG_INFO, "Cleaning up resources...");
 
-        // Retrieve detections from data
-        gettimeofday(&start_ts, NULL);
-        if (!model_run_inference(model_provider, vdo_buf)) {
-            // No power
-            if (!vdo_stream_buffer_unref(image_provider->vdo_stream, &vdo_buf, &vdo_error)) {
-                if (!vdo_error_is_expected(&vdo_error)) {
-                    panic("%s: Unexpexted error: %s", __func__, vdo_error->message);
-                }
-                g_clear_error(&vdo_error);
-            }
-            img_provider_flush_all_frames(image_provider);
-            continue;
-        }
-        gettimeofday(&end_ts, NULL);
-
-        inference_ms = (unsigned int)(((end_ts.tv_sec - start_ts.tv_sec) * 1000) +
-                                      ((end_ts.tv_usec - start_ts.tv_usec) / 1000));
-        syslog(LOG_INFO, "Ran inference for %u ms", inference_ms);
-
-        total_elapsed_ms = inference_ms + preprocessing_ms;
-
-        // Check if the framerate from vdo should be changed
-        img_provider_update_framerate(image_provider, total_elapsed_ms);
-
-        for (size_t i = 0; i < number_output_tensors; i++) {
-            if (!model_get_tensor_output_info(model_provider, i, &tensor_outputs[i])) {
-                panic("Failed to get output tensor info for %zu", i);
-            }
-        }
-
-        uint8_t* tensor_data = tensor_outputs[0].data;
-        // Parse the output
-        gettimeofday(&start_ts, NULL);
-        filter_detections(tensor_data,
-                          conf_threshold,
-                          iou_threshold,
-                          model_params,
-                          invalid_detections);
-        gettimeofday(&end_ts, NULL);
-        syslog(LOG_INFO, "Ran parsing for %u ms", elapsed_ms(&start_ts, &end_ts));
-
-        bbox_clear(bbox);
-
-        int valid_detection_count = 0;
-
-        for (int i = 0; i < model_params->num_detections; i++) {
-            if (invalid_detections[i] == 1) {
-                continue;
-            }
-
-            valid_detection_count++;
-
-            float highest_class_likelihood = 0.0;
-            int label_idx                  = 0;
-            float object_likelihood        = 0.0;
-
-            determine_class_and_object_likelihood(tensor_data,
-                                                  i,
-                                                  size_per_detection,
-                                                  qt_zero_point,
-                                                  qt_scale,
-                                                  &highest_class_likelihood,
-                                                  &label_idx,
-                                                  &object_likelihood);
-            // Log info about object
-            syslog(LOG_INFO,
-                   "Object %d: Label=%s, Object Likelihood=%.2f, Class Likelihood=%.2f, ",
-                   valid_detection_count,
-                   labels[label_idx],
-                   object_likelihood,
-                   highest_class_likelihood);
-
-            float x1, y1, x2, y2;
-            determine_bbox_coordinates(tensor_data,
-                                       i,
-                                       size_per_detection,
-                                       qt_zero_point,
-                                       qt_scale,
-                                       &x1,
-                                       &y1,
-                                       &x2,
-                                       &y2);
-            syslog(LOG_INFO, "Bounding Box: [%.2f, %.2f, %.2f, %.2f]", x1, y1, x2, y2);
-
-            // No need to compensate for rotation since bbox will handle this
-            bbox_coordinates_frame_normalized(bbox);
-            bbox_rectangle(bbox, x1, y1, x2, y2);
-
-            syslog(LOG_INFO,
-                   "Detected %s with confidence %.2f at (%.2f, %.2f, %.2f, %.2f)",
-                   labels[label_idx],
-                   highest_class_likelihood,
-                   x1,
-                   y1,
-                   x2,
-                   y2);
-
-            // Send object detection event immediately (following send_event.c pattern)
-            send_object_detection_event(labels[label_idx],
-                                        highest_class_likelihood,
-                                        x1,
-                                        y1,
-                                        x2,
-                                        y2);
-            process_glib_events();
-        }
-
-        if (!bbox_commit(bbox, 0u)) {
-            panic("Failed to commit box drawer");
-        }
-
-        // This will allow vdo to fill this buffer with data again
-        if (!vdo_stream_buffer_unref(image_provider->vdo_stream, &vdo_buf, &vdo_error)) {
-            if (!vdo_error_is_expected(&vdo_error)) {
-                panic("%s: Unexpexted error: %s", __func__, vdo_error->message);
-            }
-            g_clear_error(&vdo_error);
-        }
-    }
-
-end:
     cleanup_event_system();
-    // Cleanup
+
+    // Cleanup all resources
     free(model_params);
+    free(invalid_detections);
     if (image_provider) {
         destroy_img_provider(image_provider);
     }
@@ -799,9 +862,14 @@ end:
     free(tensor_outputs);
     free(labels);
     free(label_file_data);
-    bbox_destroy(bbox);
+    if (bbox) {
+        bbox_destroy(bbox);
+    }
+
+    if (main_loop) {
+        g_main_loop_unref(main_loop);
+    }
 
     syslog(LOG_INFO, "Exit %s", argv[0]);
-
     return 0;
 }
