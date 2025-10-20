@@ -57,6 +57,17 @@
 
 volatile sig_atomic_t running = 1;
 
+// Event system structure (following send_event.c pattern)
+typedef struct {
+    AXEventHandler* event_handler;
+    guint event_id;
+    gboolean declaration_complete;
+    guint detection_timer;
+} EventSystem;
+
+static EventSystem* event_system = NULL;
+static GMainLoop* main_loop      = NULL;
+
 static void shutdown(int status) {
     syslog(LOG_INFO, "Received signal %d, shutting down", status);
     running = 0;
@@ -72,17 +83,6 @@ static void shutdown(int status) {
         g_main_loop_quit(main_loop);
     }
 }
-
-// Event system structure (following send_event.c pattern)
-typedef struct {
-    AXEventHandler* event_handler;
-    guint event_id;
-    gboolean declaration_complete;
-    guint detection_timer;
-} EventSystem;
-
-static EventSystem* event_system = NULL;
-static GMainLoop* main_loop      = NULL;
 
 static gboolean detection_timer_callback(gpointer user_data) {
     // Move all your detection code here (from the while loop)
