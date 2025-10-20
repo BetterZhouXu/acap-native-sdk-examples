@@ -49,13 +49,13 @@
 #include <syslog.h>
 
 #include <axsdk/axevent.h>
+#include <errno.h>
 #include <glib-object.h>
 #include <glib.h>
+#include <string.h>  // for strerror if not already included
 #include <unistd.h>
 
 #define APP_NAME "object_detection_yolov5"
-
-volatile sig_atomic_t running = 1;
 
 // Event system structure (following send_event.c pattern)
 typedef struct {
@@ -75,8 +75,43 @@ typedef struct model_params {
     int size_per_detection;
 } model_params_t;
 
-static EventSystem* event_system = NULL;
-static GMainLoop* main_loop      = NULL;
+typedef struct {
+    img_provider_t* image_provider;
+    model_provider_t* model_provider;
+    model_tensor_output_t* tensor_outputs;
+    size_t number_output_tensors;
+    bbox_t* bbox;
+    char** labels;
+    model_params_t* model_params;
+    int* invalid_detections;
+    float conf_threshold;
+    float iou_threshold;
+} detection_data_t;
+
+static void shutdown(int status);
+static char* compose_detection_result(const char* object_class,
+                                      float confidence,
+                                      float x1,
+                                      float y1,
+                                      float x2,
+                                      float y2);
+static void send_object_detection_event(const char* object_class,
+                                        float confidence,
+                                        float x1,
+                                        float y1,
+                                        float x2,
+                                        float y2);
+static void declaration_complete(guint declaration, gpointer user_data);
+static guint setup_object_detection_declaration(AXEventHandler* event_handler, gpointer user_data);
+static void initialize_event_system(gpointer user_data);
+static void cleanup_event_system(void);
+
+volatile sig_atomic_t running                  = 1;
+static EventSystem* event_system               = NULL;
+static GMainLoop* main_loop                    = NULL;
+static detection_data_t* global_detection_data = NULL;
+
+static gboolean detection_timer_callback(gpointer user_data);
 
 static void shutdown(int status) {
     syslog(LOG_INFO, "Received signal %d, shutting down", status);
@@ -92,185 +127,6 @@ static void shutdown(int status) {
     if (main_loop) {
         g_main_loop_quit(main_loop);
     }
-}
-
-static gboolean detection_timer_callback(gpointer user_data) {
-    // Move all your detection code here (from the while loop)
-    // This will be called periodically by GLib
-
-    if (!running) {
-        syslog(LOG_INFO, "Stopping detection timer");
-        return FALSE;  // Stop the timer
-    }
-
-    // Your existing detection code goes here (from line ~480 onwards)
-    struct timeval start_ts, end_ts;
-    unsigned int preprocessing_ms = 0;
-    unsigned int inference_ms     = 0;
-    unsigned int total_elapsed_ms = 0;
-
-    // Get the necessary variables from user_data
-    typedef struct {
-        img_provider_t* image_provider;
-        model_provider_t* model_provider;
-        model_tensor_output_t* tensor_outputs;
-        size_t number_output_tensors;
-        bbox_t* bbox;
-        char** labels;
-        model_params_t* model_params;
-        int* invalid_detections;
-        float conf_threshold;
-        float iou_threshold;
-    } detection_data_t;
-
-    detection_data_t* data = (detection_data_t*)user_data;
-
-    g_autoptr(GError) vdo_error  = NULL;
-    g_autoptr(VdoBuffer) vdo_buf = img_provider_get_frame(data->image_provider);
-
-    if (!vdo_buf) {
-        syslog(LOG_INFO,
-               "No buffer because of changed global rotation. Application needs to be restarted");
-        running = 0;
-        return FALSE;
-    }
-
-    // All your existing detection processing code...
-    gettimeofday(&start_ts, NULL);
-    if (!model_run_preprocessing(data->model_provider, vdo_buf)) {
-        if (!vdo_stream_buffer_unref(data->image_provider->vdo_stream, &vdo_buf, &vdo_error)) {
-            if (!vdo_error_is_expected(&vdo_error)) {
-                syslog(LOG_ERR, "Unexpected error: %s", vdo_error->message);
-            }
-            g_clear_error(&vdo_error);
-        }
-        img_provider_flush_all_frames(data->image_provider);
-        return TRUE;  // Continue running
-    }
-    gettimeofday(&end_ts, NULL);
-
-    preprocessing_ms = elapsed_ms(&start_ts, &end_ts);
-    syslog(LOG_INFO, "Ran pre-processing for %u ms", preprocessing_ms);
-
-    gettimeofday(&start_ts, NULL);
-    if (!model_run_inference(data->model_provider, vdo_buf)) {
-        if (!vdo_stream_buffer_unref(data->image_provider->vdo_stream, &vdo_buf, &vdo_error)) {
-            if (!vdo_error_is_expected(&vdo_error)) {
-                syslog(LOG_ERR, "Unexpected error: %s", vdo_error->message);
-            }
-            g_clear_error(&vdo_error);
-        }
-        img_provider_flush_all_frames(data->image_provider);
-        return TRUE;
-    }
-    gettimeofday(&end_ts, NULL);
-
-    inference_ms = elapsed_ms(&start_ts, &end_ts);
-    syslog(LOG_INFO, "Ran inference for %u ms", inference_ms);
-
-    total_elapsed_ms = inference_ms + preprocessing_ms;
-    img_provider_update_framerate(data->image_provider, total_elapsed_ms);
-
-    // Get tensor outputs
-    for (size_t i = 0; i < data->number_output_tensors; i++) {
-        if (!model_get_tensor_output_info(data->model_provider, i, &data->tensor_outputs[i])) {
-            syslog(LOG_ERR, "Failed to get output tensor info for %zu", i);
-            return TRUE;
-        }
-    }
-
-    uint8_t* tensor_data = data->tensor_outputs[0].data;
-
-    gettimeofday(&start_ts, NULL);
-    filter_detections(tensor_data,
-                      data->conf_threshold,
-                      data->iou_threshold,
-                      data->model_params,
-                      data->invalid_detections);
-    gettimeofday(&end_ts, NULL);
-    syslog(LOG_INFO, "Ran parsing for %u ms", elapsed_ms(&start_ts, &end_ts));
-
-    bbox_clear(data->bbox);
-
-    int valid_detection_count = 0;
-    int size_per_detection    = data->model_params->size_per_detection;
-    float qt_zero_point       = data->model_params->quantization_zero_point;
-    float qt_scale            = data->model_params->quantization_scale;
-
-    // Process detections
-    for (int i = 0; i < data->model_params->num_detections; i++) {
-        if (data->invalid_detections[i] == 1) {
-            continue;
-        }
-
-        valid_detection_count++;
-
-        float highest_class_likelihood = 0.0;
-        int label_idx                  = 0;
-        float object_likelihood        = 0.0;
-
-        determine_class_and_object_likelihood(tensor_data,
-                                              i,
-                                              size_per_detection,
-                                              qt_zero_point,
-                                              qt_scale,
-                                              &highest_class_likelihood,
-                                              &label_idx,
-                                              &object_likelihood);
-
-        syslog(LOG_INFO,
-               "Object %d: Label=%s, Object Likelihood=%.2f, Class Likelihood=%.2f",
-               valid_detection_count,
-               data->labels[label_idx],
-               object_likelihood,
-               highest_class_likelihood);
-
-        float x1, y1, x2, y2;
-        determine_bbox_coordinates(tensor_data,
-                                   i,
-                                   size_per_detection,
-                                   qt_zero_point,
-                                   qt_scale,
-                                   &x1,
-                                   &y1,
-                                   &x2,
-                                   &y2);
-        syslog(LOG_INFO, "Bounding Box: [%.2f, %.2f, %.2f, %.2f]", x1, y1, x2, y2);
-
-        bbox_coordinates_frame_normalized(data->bbox);
-        bbox_rectangle(data->bbox, x1, y1, x2, y2);
-
-        syslog(LOG_INFO,
-               "Detected %s with confidence %.2f at (%.2f, %.2f, %.2f, %.2f)",
-               data->labels[label_idx],
-               highest_class_likelihood,
-               x1,
-               y1,
-               x2,
-               y2);
-
-        // Send object detection event
-        send_object_detection_event(data->labels[label_idx],
-                                    highest_class_likelihood,
-                                    x1,
-                                    y1,
-                                    x2,
-                                    y2);
-    }
-
-    if (!bbox_commit(data->bbox, 0u)) {
-        syslog(LOG_ERR, "Failed to commit box drawer");
-    }
-
-    // Unref the buffer
-    if (!vdo_stream_buffer_unref(data->image_provider->vdo_stream, &vdo_buf, &vdo_error)) {
-        if (!vdo_error_is_expected(&vdo_error)) {
-            syslog(LOG_ERR, "Unexpected error: %s", vdo_error->message);
-        }
-        g_clear_error(&vdo_error);
-    }
-
-    return TRUE;  // Continue running the timer
 }
 
 static char* compose_detection_result(const char* object_class,
@@ -311,11 +167,12 @@ static void send_object_detection_event(const char* object_class,
     GError* error                     = NULL;
 
     // Only send if declaration is complete
-    if (!event_system || !event_system->declaration_complete) {
+    if (!event_system || !event_system->declaration_complete || !event_system->event_handler) {
         syslog(LOG_WARNING,
-               "Event system not ready: system=%p, complete=%d",
+               "Event system not ready: system=%p, complete=%d, handler=%p",
                event_system,
-               event_system ? event_system->declaration_complete : -1);
+               event_system ? event_system->declaration_complete : -1,
+               event_system ? event_system->event_handler : NULL);
         return;
     }
 
@@ -328,6 +185,7 @@ static void send_object_detection_event(const char* object_class,
         compose_detection_result(object_class, confidence, x1, y1, x2, y2);
     if (!detection_result) {
         syslog(LOG_ERR, "❌ Failed to compose detection result JSON");
+        ax_event_key_value_set_free(key_value_set);
         return;
     }
 
@@ -347,9 +205,16 @@ static void send_object_detection_event(const char* object_class,
     // Create the event (like send_event.c)
     // Use ax_event_new2 since ax_event_new is deprecated from 3.2
     event = ax_event_new2(key_value_set, NULL);
+    if (!event) {
+        syslog(LOG_ERR, "❌ Failed to create event");
+        free((void*)detection_result);
+        ax_event_key_value_set_free(key_value_set);
+        return;
+    }
 
     // The key/value set is no longer needed (following send_event.c pattern)
     ax_event_key_value_set_free(key_value_set);
+    free((void*)detection_result);
 
     // Send the event (like send_event.c)
     if (!ax_event_handler_send_event(event_system->event_handler,
@@ -380,20 +245,6 @@ static void declaration_complete(guint declaration, gpointer user_data) {
            "Event declaration marked as complete, status of declaration_complete=%d",
            event_system->declaration_complete);
 
-    // Start detection timer when declaration is complete
-    typedef struct {
-        img_provider_t* image_provider;
-        model_provider_t* model_provider;
-        model_tensor_output_t* tensor_outputs;
-        size_t number_output_tensors;
-        bbox_t* bbox;
-        char** labels;
-        model_params_t* model_params;
-        int* invalid_detections;
-        float conf_threshold;
-        float iou_threshold;
-    } detection_data_t;
-
     detection_data_t* detection_data = (detection_data_t*)user_data;
 
     // Start detection timer - run every 500ms (about 2 FPS)
@@ -405,7 +256,7 @@ static void declaration_complete(guint declaration, gpointer user_data) {
  * Setup a declaration of an object detection event.
  * Following the exact pattern from send_event.c setup_declaration
  */
-static guint setup_object_detection_declaration(AXEventHandler* event_handler) {
+static guint setup_object_detection_declaration(AXEventHandler* event_handler, gpointer user_data) {
     AXEventKeyValueSet* key_value_set = NULL;
     guint declaration                 = 0;
     guint token                       = 0;
@@ -469,7 +320,7 @@ static guint setup_object_detection_declaration(AXEventHandler* event_handler) {
             FALSE,  // TRUE for stateless events (unlike send_event.c which uses FALSE for stateful)
             &declaration,
             (AXDeclarationCompleteCallback)declaration_complete,
-            NULL,  // No user data needed
+            user_data,
             &error)) {
         syslog(LOG_WARNING, "Could not declare object detection event: %s", error->message);
         g_error_free(error);
@@ -485,7 +336,7 @@ static guint setup_object_detection_declaration(AXEventHandler* event_handler) {
 /**
  * Initialize event system (following send_event.c main function pattern)
  */
-static void initialize_event_system(void) {
+static void initialize_event_system(gpointer user_data) {
     syslog(LOG_INFO, "Initializing object detection event system");
 
     // Allocate event system (like send_event.c allocates app_data)
@@ -494,7 +345,8 @@ static void initialize_event_system(void) {
     event_system->declaration_complete = FALSE;
 
     // Setup declaration (like send_event.c)
-    event_system->event_id = setup_object_detection_declaration(event_system->event_handler);
+    event_system->event_id =
+        setup_object_detection_declaration(event_system->event_handler, user_data);
     syslog(LOG_INFO,
            "Initialized object detection event system: event_id=%u",
            event_system->event_id);
@@ -689,10 +541,178 @@ static void determine_bbox_coordinates(uint8_t* tensor,
     find_corners(x, y, w, h, x1, y1, x2, y2);
 }
 
-int main(int argc, char** argv) {
-    // Initialize event system first
-    initialize_event_system();
+static gboolean detection_timer_callback(gpointer user_data) {
+    // Move all your detection code here (from the while loop)
+    // This will be called periodically by GLib
 
+    if (!running) {
+        syslog(LOG_INFO, "Stopping detection timer");
+        return FALSE;  // Stop the timer
+    }
+
+    // Your existing detection code goes here (from line ~480 onwards)
+    struct timeval start_ts, end_ts;
+    unsigned int preprocessing_ms = 0;
+    unsigned int inference_ms     = 0;
+    unsigned int total_elapsed_ms = 0;
+
+    // Get the necessary variables from user_data
+
+    detection_data_t* data = (detection_data_t*)user_data;
+    if (!data || !data->image_provider) {
+        syslog(LOG_ERR, "Invalid detection data in timer callback");
+        return FALSE;
+    }
+
+    g_autoptr(GError) vdo_error  = NULL;
+    g_autoptr(VdoBuffer) vdo_buf = img_provider_get_frame(data->image_provider);
+
+    if (!vdo_buf) {
+        syslog(LOG_INFO,
+               "No buffer because of changed global rotation. Application needs to be restarted");
+        running = 0;
+        return FALSE;
+    }
+
+    // All your existing detection processing code...
+    gettimeofday(&start_ts, NULL);
+    if (!model_run_preprocessing(data->model_provider, vdo_buf)) {
+        if (!vdo_stream_buffer_unref(data->image_provider->vdo_stream, &vdo_buf, &vdo_error)) {
+            if (!vdo_error_is_expected(&vdo_error)) {
+                syslog(LOG_ERR, "Unexpected error: %s", vdo_error->message);
+            }
+            g_clear_error(&vdo_error);
+        }
+        img_provider_flush_all_frames(data->image_provider);
+        return TRUE;  // Continue running
+    }
+    gettimeofday(&end_ts, NULL);
+
+    preprocessing_ms = elapsed_ms(&start_ts, &end_ts);
+    syslog(LOG_INFO, "Ran pre-processing for %u ms", preprocessing_ms);
+
+    gettimeofday(&start_ts, NULL);
+    if (!model_run_inference(data->model_provider, vdo_buf)) {
+        if (!vdo_stream_buffer_unref(data->image_provider->vdo_stream, &vdo_buf, &vdo_error)) {
+            if (!vdo_error_is_expected(&vdo_error)) {
+                syslog(LOG_ERR, "Unexpected error: %s", vdo_error->message);
+            }
+            g_clear_error(&vdo_error);
+        }
+        img_provider_flush_all_frames(data->image_provider);
+        return TRUE;
+    }
+    gettimeofday(&end_ts, NULL);
+
+    inference_ms = elapsed_ms(&start_ts, &end_ts);
+    syslog(LOG_INFO, "Ran inference for %u ms", inference_ms);
+
+    total_elapsed_ms = inference_ms + preprocessing_ms;
+    img_provider_update_framerate(data->image_provider, total_elapsed_ms);
+
+    // Get tensor outputs
+    for (size_t i = 0; i < data->number_output_tensors; i++) {
+        if (!model_get_tensor_output_info(data->model_provider, i, &data->tensor_outputs[i])) {
+            syslog(LOG_ERR, "Failed to get output tensor info for %zu", i);
+            return TRUE;
+        }
+    }
+
+    uint8_t* tensor_data = data->tensor_outputs[0].data;
+
+    gettimeofday(&start_ts, NULL);
+    filter_detections(tensor_data,
+                      data->conf_threshold,
+                      data->iou_threshold,
+                      data->model_params,
+                      data->invalid_detections);
+    gettimeofday(&end_ts, NULL);
+    syslog(LOG_INFO, "Ran parsing for %u ms", elapsed_ms(&start_ts, &end_ts));
+
+    bbox_clear(data->bbox);
+
+    int valid_detection_count = 0;
+    int size_per_detection    = data->model_params->size_per_detection;
+    float qt_zero_point       = data->model_params->quantization_zero_point;
+    float qt_scale            = data->model_params->quantization_scale;
+
+    // Process detections
+    for (int i = 0; i < data->model_params->num_detections; i++) {
+        if (data->invalid_detections[i] == 1) {
+            continue;
+        }
+
+        valid_detection_count++;
+
+        float highest_class_likelihood = 0.0;
+        int label_idx                  = 0;
+        float object_likelihood        = 0.0;
+
+        determine_class_and_object_likelihood(tensor_data,
+                                              i,
+                                              size_per_detection,
+                                              qt_zero_point,
+                                              qt_scale,
+                                              &highest_class_likelihood,
+                                              &label_idx,
+                                              &object_likelihood);
+
+        syslog(LOG_INFO,
+               "Object %d: Label=%s, Object Likelihood=%.2f, Class Likelihood=%.2f",
+               valid_detection_count,
+               data->labels[label_idx],
+               object_likelihood,
+               highest_class_likelihood);
+
+        float x1, y1, x2, y2;
+        determine_bbox_coordinates(tensor_data,
+                                   i,
+                                   size_per_detection,
+                                   qt_zero_point,
+                                   qt_scale,
+                                   &x1,
+                                   &y1,
+                                   &x2,
+                                   &y2);
+        syslog(LOG_INFO, "Bounding Box: [%.2f, %.2f, %.2f, %.2f]", x1, y1, x2, y2);
+
+        bbox_coordinates_frame_normalized(data->bbox);
+        bbox_rectangle(data->bbox, x1, y1, x2, y2);
+
+        syslog(LOG_INFO,
+               "Detected %s with confidence %.2f at (%.2f, %.2f, %.2f, %.2f)",
+               data->labels[label_idx],
+               highest_class_likelihood,
+               x1,
+               y1,
+               x2,
+               y2);
+
+        // Send object detection event
+        send_object_detection_event(data->labels[label_idx],
+                                    highest_class_likelihood,
+                                    x1,
+                                    y1,
+                                    x2,
+                                    y2);
+    }
+
+    if (!bbox_commit(data->bbox, 0u)) {
+        syslog(LOG_ERR, "Failed to commit box drawer");
+    }
+
+    // Unref the buffer
+    if (!vdo_stream_buffer_unref(data->image_provider->vdo_stream, &vdo_buf, &vdo_error)) {
+        if (!vdo_error_is_expected(&vdo_error)) {
+            syslog(LOG_ERR, "Unexpected error: %s", vdo_error->message);
+        }
+        g_clear_error(&vdo_error);
+    }
+
+    return TRUE;  // Continue running the timer
+}
+
+int main(int argc, char** argv) {
     // Signal handlers
     signal(SIGTERM, shutdown);
     signal(SIGINT, shutdown);
@@ -803,20 +823,6 @@ int main(int argc, char** argv) {
 
     bbox_t* bbox = setup_bbox();
 
-    // Prepare detection data for the timer callback
-    typedef struct {
-        img_provider_t* image_provider;
-        model_provider_t* model_provider;
-        model_tensor_output_t* tensor_outputs;
-        size_t number_output_tensors;
-        bbox_t* bbox;
-        char** labels;
-        model_params_t* model_params;
-        int* invalid_detections;
-        float conf_threshold;
-        float iou_threshold;
-    } detection_data_t;
-
     detection_data_t detection_data = {.image_provider        = image_provider,
                                        .model_provider        = model_provider,
                                        .tensor_outputs        = tensor_outputs,
@@ -828,9 +834,11 @@ int main(int argc, char** argv) {
                                        .conf_threshold        = conf_threshold,
                                        .iou_threshold         = iou_threshold};
 
-    // Update the declaration to pass detection_data
-    // We need to modify setup_object_detection_declaration to accept user_data
-    // For now, we'll store it globally or update the callback
+    // Set global reference for shutdown function
+    global_detection_data = &detection_data;
+
+    // Initialize event system AFTER creating detection_data
+    initialize_event_system(&detection_data);
 
     // Send test events immediately (before starting main loop)
     syslog(LOG_INFO, "Sending test object detection events");
