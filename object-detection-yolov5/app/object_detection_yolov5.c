@@ -720,6 +720,15 @@ int main(int argc, char** argv) {
     args_t args;
     parse_args(argc, argv, &args);
 
+    model_params_t* model_params          = NULL;
+    int* invalid_detections               = NULL;
+    img_provider_t* image_provider        = NULL;
+    model_provider_t* model_provider      = NULL;
+    model_tensor_output_t* tensor_outputs = NULL;
+    char** labels                         = NULL;
+    char* label_file_data                 = NULL;
+    bbox_t* bbox                          = NULL;
+
     // All your initialization code...
     model_params_t* model_params = (model_params_t*)malloc(sizeof(model_params_t));
     if (model_params == NULL) {
@@ -859,17 +868,27 @@ cleanup:
     cleanup_event_system();
 
     // Cleanup all resources
-    free(model_params);
-    free(invalid_detections);
+    if (model_params) {
+        free(model_params);
+    }
+    if (invalid_detections) {
+        free(invalid_detections);
+    }
     if (image_provider) {
         destroy_img_provider(image_provider);
     }
     if (model_provider) {
         destroy_model_provider(model_provider);
     }
-    free(tensor_outputs);
-    free(labels);
-    free(label_file_data);
+    if (tensor_outputs) {
+        free(tensor_outputs);
+    }
+    if (labels) {
+        free(labels);
+    }
+    if (label_file_data) {
+        free(label_file_data);
+    }
     if (bbox) {
         bbox_destroy(bbox);
     }
