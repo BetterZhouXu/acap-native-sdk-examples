@@ -753,7 +753,7 @@ int main(int argc, char** argv) {
     syslog(LOG_INFO, "Number of classes: %d", model_params->num_classes);
     syslog(LOG_INFO, "Number of detections: %d", model_params->num_detections);
 
-    int* invalid_detections = calloc(model_params->num_detections, sizeof(int));
+    invalid_detections = calloc(model_params->num_detections, sizeof(int));
 
     // Get parameters
     GError* axparameter_error       = NULL;
@@ -792,37 +792,33 @@ int main(int argc, char** argv) {
            stream_width,
            stream_height);
 
-    img_provider_t* image_provider =
-        create_img_provider(stream_width, stream_height, 2, vdo_format, vdo_framerate);
+    image_provider = create_img_provider(stream_width, stream_height, 2, vdo_format, vdo_framerate);
     if (!image_provider) {
         panic("%s: Could not create image provider", __func__);
     }
 
-    size_t number_output_tensors     = 0;
-    model_provider_t* model_provider = create_model_provider(model_params->input_width,
-                                                             model_params->input_height,
-                                                             image_provider->width,
-                                                             image_provider->height,
-                                                             image_provider->pitch,
-                                                             image_provider->format,
-                                                             VDO_FORMAT_RGB,
-                                                             args.model_file,
-                                                             args.device_name,
-                                                             false,
-                                                             &number_output_tensors);
+    size_t number_output_tensors = 0;
+    model_provider               = create_model_provider(model_params->input_width,
+                                           model_params->input_height,
+                                           image_provider->width,
+                                           image_provider->height,
+                                           image_provider->pitch,
+                                           image_provider->format,
+                                           VDO_FORMAT_RGB,
+                                           args.model_file,
+                                           args.device_name,
+                                           false,
+                                           &number_output_tensors);
     if (!model_provider) {
         panic("%s: Could not create model provider", __func__);
     }
 
-    model_tensor_output_t* tensor_outputs =
-        calloc(number_output_tensors, sizeof(model_tensor_output_t));
+    tensor_outputs = calloc(number_output_tensors, sizeof(model_tensor_output_t));
     if (!tensor_outputs) {
         panic("%s: Could not allocate tensor outputs", __func__);
     }
 
-    char** labels = NULL;
     size_t num_labels;
-    char* label_file_data = NULL;
     parse_labels(&labels, &label_file_data, args.labels_file, &num_labels);
 
     syslog(LOG_INFO, "Start fetching video frames from VDO");
@@ -830,7 +826,7 @@ int main(int argc, char** argv) {
         panic("%s: Could not start image provider", __func__);
     }
 
-    bbox_t* bbox = setup_bbox();
+    bbox = setup_bbox();
 
     detection_data_t detection_data = {.image_provider        = image_provider,
                                        .model_provider        = model_provider,
