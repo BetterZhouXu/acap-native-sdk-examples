@@ -288,7 +288,17 @@ static guint setup_object_detection_declaration(AXEventHandler* event_handler) {
 
     // Mark fields appropriately
     ax_event_key_value_set_mark_as_source(key_value_set, "Token", NULL, NULL);
+    ax_event_key_value_set_mark_as_user_defined(key_value_set,
+                                                "Token",
+                                                NULL,
+                                                "wstype:tt:ReferenceToken",
+                                                NULL);
     ax_event_key_value_set_mark_as_data(key_value_set, "Result", NULL, NULL);
+    ax_event_key_value_set_mark_as_user_defined(key_value_set,
+                                                "Result",
+                                                NULL,
+                                                "wstype:xs:string",
+                                                NULL);
 
     // Declare the event (stateless - each detection is a separate event)
     if (!ax_event_handler_declare(event_handler,
