@@ -15,19 +15,11 @@
  */
 
 /**
- * - object_detection_bbox_yolov5 -
+ * - object_detection_bbox_yolov5 with Event Sending -
  *
  * This application loads a larod YOLOv5 model which takes an image as input. The output is
  * YOLOv5-specifically parsed to retrieve values corresponding to the class, score and location of
- * detected objects in the image.
- *
- * The application expects two arguments on the command line in the
- * following order: MODELFILE LABELSFILE.
- *
- * First argument, MODELFILE, is a string describing path to the model.
- *
- * Second argument, LABELSFILE, is a string describing path to the label txt.
- *
+ * detected objects in the image. When objects are detected, ONVIF events are sent.
  */
 
 #include "argparse.h"
@@ -39,12 +31,18 @@
 #include "vdo-error.h"
 #include "vdo-frame.h"
 #include "vdo-types.h"
+#include <axsdk/axevent.h>
 #include <axsdk/axparameter.h>
 #include <bbox.h>
+#include <glib-object.h>
+#include <glib.h>
 
+#include <errno.h>
 #include <math.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/time.h>
 #include <syslog.h>
 
@@ -52,11 +50,27 @@
 
 volatile sig_atomic_t running = 1;
 
-static void shutdown(int status) {
-    (void)status;
-    running = 0;
-}
+// Event system structure
+typedef struct {
+    AXEventHandler* event_handler;
+    guint event_id;
+    gboolean declaration_complete;
+    GMainLoop* main_loop;
+    pthread_t thread;
+} EventSystem;
 
+static EventSystem* event_system = NULL;
+
+// Event queue structure for thread-safe communication
+typedef struct {
+    char* object_class;
+    float confidence;
+    float x1, y1, x2, y2;
+} DetectionEvent;
+
+static GAsyncQueue* event_queue = NULL;
+
+// Model parameters structure
 typedef struct model_params {
     int input_width;
     int input_height;
@@ -67,6 +81,331 @@ typedef struct model_params {
     int size_per_detection;
 } model_params_t;
 
+// Function declarations
+static void shutdown(int status);
+static void* event_thread_function(void* arg);
+static void initialize_event_system(void);
+static void cleanup_event_system(void);
+static void queue_detection_event(const char* object_class,
+                                  float confidence,
+                                  float x1,
+                                  float y1,
+                                  float x2,
+                                  float y2);
+
+// Shutdown handler
+static void shutdown(int status) {
+    syslog(LOG_INFO, "Received signal %d, shutting down", status);
+    running = 0;
+
+    // Signal event thread to quit
+    if (event_system && event_system->main_loop) {
+        g_main_loop_quit(event_system->main_loop);
+    }
+}
+
+// Compose detection result as JSON
+static char* compose_detection_result(const char* object_class,
+                                      float confidence,
+                                      float x1,
+                                      float y1,
+                                      float x2,
+                                      float y2) {
+    char* json_string = malloc(512);
+    if (!json_string)
+        return NULL;
+
+    snprintf(json_string,
+             512,
+             "{\"class\":\"%s\",\"confidence\":%.3f,\"bbox\":[%.3f,%.3f,%.3f,%.3f]}",
+             object_class,
+             confidence,
+             x1,
+             y1,
+             x2,
+             y2);
+
+    return json_string;
+}
+
+// Send object detection event (runs in event thread)
+static void send_object_detection_event(const char* object_class,
+                                        float confidence,
+                                        float x1,
+                                        float y1,
+                                        float x2,
+                                        float y2) {
+    AXEventKeyValueSet* key_value_set = NULL;
+    AXEvent* event                    = NULL;
+    GError* error                     = NULL;
+
+    // Check if event system is ready
+    if (!event_system || !event_system->event_handler || !event_system->declaration_complete) {
+        syslog(LOG_WARNING, "Event system not ready, skipping event");
+        return;
+    }
+
+    syslog(LOG_INFO, "📤 Sending event for %s (confidence: %.2f)", object_class, confidence);
+
+    // Compose detection result as JSON
+    char* detection_result = compose_detection_result(object_class, confidence, x1, y1, x2, y2);
+    if (!detection_result) {
+        syslog(LOG_ERR, "❌ Failed to compose detection result JSON");
+        return;
+    }
+
+    // Create key-value set for the event data
+    key_value_set = ax_event_key_value_set_new();
+
+    // Add the detection result as event data
+    if (!ax_event_key_value_set_add_key_value(key_value_set,
+                                              "Result",
+                                              NULL,
+                                              (const void**)&detection_result,
+                                              AX_VALUE_TYPE_STRING,
+                                              NULL)) {
+        syslog(LOG_ERR, "❌ Failed to add Result to event");
+        free(detection_result);
+        ax_event_key_value_set_free(key_value_set);
+        return;
+    }
+
+    // Create the event
+    event = ax_event_new2(key_value_set, NULL);
+    if (!event) {
+        syslog(LOG_ERR, "❌ Failed to create event");
+        free(detection_result);
+        ax_event_key_value_set_free(key_value_set);
+        return;
+    }
+
+    // Send the event
+    if (!ax_event_handler_send_event(event_system->event_handler,
+                                     event_system->event_id,
+                                     event,
+                                     &error)) {
+        syslog(LOG_ERR, "❌ Failed to send event: %s", error ? error->message : "Unknown error");
+        if (error)
+            g_error_free(error);
+    } else {
+        syslog(LOG_INFO, "✅ Successfully sent event: %s", object_class);
+    }
+
+    // Cleanup
+    free(detection_result);
+    ax_event_key_value_set_free(key_value_set);
+    ax_event_free(event);
+}
+
+// Process queued detection events (runs in event thread)
+static gboolean process_detection_events(gpointer user_data) {
+    (void)user_data;
+
+    DetectionEvent* detection;
+
+    // Process all queued events
+    while ((detection = g_async_queue_try_pop(event_queue)) != NULL) {
+        send_object_detection_event(detection->object_class,
+                                    detection->confidence,
+                                    detection->x1,
+                                    detection->y1,
+                                    detection->x2,
+                                    detection->y2);
+
+        // Cleanup
+        free(detection->object_class);
+        free(detection);
+    }
+
+    return TRUE;  // Continue running
+}
+
+// Declaration complete callback
+static void declaration_complete(guint declaration, gpointer user_data) {
+    (void)user_data;
+    syslog(LOG_INFO, "Declaration complete for: %d", declaration);
+
+    event_system->declaration_complete = TRUE;
+    syslog(LOG_INFO, "Event declaration marked as complete");
+
+    // Send test events to verify system works
+    syslog(LOG_INFO, "🧪 Sending test object detection events");
+    send_object_detection_event("TestObject1", 0.99, 0.1, 0.2, 0.3, 0.4);
+    send_object_detection_event("TestObject2", 0.88, 0.5, 0.6, 0.7, 0.8);
+
+    // Set up timer to process queued events every 10ms
+    g_timeout_add(10, process_detection_events, NULL);
+}
+
+// Setup object detection event declaration
+static guint setup_object_detection_declaration(AXEventHandler* event_handler) {
+    AXEventKeyValueSet* key_value_set = NULL;
+    guint declaration                 = 0;
+    guint token                       = 0;
+    GError* error                     = NULL;
+
+    syslog(LOG_INFO, "Declaring object detection event");
+
+    key_value_set = ax_event_key_value_set_new();
+
+    // Define the event topics (ONVIF VideoAnalytics ObjectDetected)
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "topic0",
+                                         "tns1",
+                                         "VideoAnalytics",
+                                         AX_VALUE_TYPE_STRING,
+                                         NULL);
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "topic1",
+                                         "tns1",
+                                         "ObjectDetected",
+                                         AX_VALUE_TYPE_STRING,
+                                         NULL);
+
+    // Add source field (Token)
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "Token",
+                                         NULL,
+                                         &token,
+                                         AX_VALUE_TYPE_INT,
+                                         NULL);
+
+    // Add data field (Result - JSON string with detection details)
+    const char* initial_result = "";
+    ax_event_key_value_set_add_key_value(key_value_set,
+                                         "Result",
+                                         NULL,
+                                         &initial_result,
+                                         AX_VALUE_TYPE_STRING,
+                                         NULL);
+
+    // Mark fields appropriately
+    ax_event_key_value_set_mark_as_source(key_value_set, "Token", NULL, NULL);
+    ax_event_key_value_set_mark_as_data(key_value_set, "Result", NULL, NULL);
+
+    // Declare the event (stateless - each detection is a separate event)
+    if (!ax_event_handler_declare(event_handler,
+                                  key_value_set,
+                                  TRUE,  // Stateless
+                                  &declaration,
+                                  (AXDeclarationCompleteCallback)declaration_complete,
+                                  NULL,
+                                  &error)) {
+        if (error != NULL) {
+            syslog(LOG_ERR, "❌ Failed to declare object detection event: %s", error->message);
+            g_error_free(error);
+        }
+        declaration = 0;
+    } else {
+        syslog(LOG_INFO, "✅ Object detection event declared successfully (ID: %u)", declaration);
+    }
+
+    ax_event_key_value_set_free(key_value_set);
+    return declaration;
+}
+
+// Event thread function (runs GLib main loop)
+static void* event_thread_function(void* arg) {
+    (void)arg;
+    syslog(LOG_INFO, "Event thread started");
+
+    event_system->event_handler        = ax_event_handler_new();
+    event_system->declaration_complete = FALSE;
+    event_system->event_id = setup_object_detection_declaration(event_system->event_handler);
+
+    // Create and run GLib main loop in this thread
+    event_system->main_loop = g_main_loop_new(NULL, FALSE);
+    syslog(LOG_INFO, "Starting GLib main loop in event thread");
+
+    g_main_loop_run(event_system->main_loop);
+
+    syslog(LOG_INFO, "Event thread exiting");
+    return NULL;
+}
+
+// Initialize event system (creates thread with GLib main loop)
+static void initialize_event_system(void) {
+    syslog(LOG_INFO, "Initializing object detection event system");
+
+    event_system = calloc(1, sizeof(EventSystem));
+    if (!event_system) {
+        syslog(LOG_ERR, "Failed to allocate event system");
+        return;
+    }
+
+    // Create event queue for thread-safe communication
+    event_queue = g_async_queue_new();
+
+    // Create event thread
+    if (pthread_create(&event_system->thread, NULL, event_thread_function, NULL) != 0) {
+        syslog(LOG_ERR, "Failed to create event thread");
+        free(event_system);
+        event_system = NULL;
+        return;
+    }
+
+    syslog(LOG_INFO, "Event system initialized with separate thread");
+}
+
+// Queue detection event (called from main thread)
+static void queue_detection_event(const char* object_class,
+                                  float confidence,
+                                  float x1,
+                                  float y1,
+                                  float x2,
+                                  float y2) {
+    if (!event_queue)
+        return;
+
+    DetectionEvent* detection = malloc(sizeof(DetectionEvent));
+    if (!detection)
+        return;
+
+    detection->object_class = strdup(object_class);
+    detection->confidence   = confidence;
+    detection->x1           = x1;
+    detection->y1           = y1;
+    detection->x2           = x2;
+    detection->y2           = y2;
+
+    g_async_queue_push(event_queue, detection);
+}
+
+// Cleanup event system
+static void cleanup_event_system(void) {
+    if (event_system) {
+        if (event_system->main_loop) {
+            g_main_loop_quit(event_system->main_loop);
+        }
+
+        // Wait for thread to finish
+        pthread_join(event_system->thread, NULL);
+
+        if (event_system->main_loop) {
+            g_main_loop_unref(event_system->main_loop);
+        }
+        if (event_system->event_handler) {
+            ax_event_handler_free(event_system->event_handler);
+        }
+        free(event_system);
+        event_system = NULL;
+    }
+
+    if (event_queue) {
+        // Clean up any remaining events
+        DetectionEvent* detection;
+        while ((detection = g_async_queue_try_pop(event_queue)) != NULL) {
+            free(detection->object_class);
+            free(detection);
+        }
+        g_async_queue_unref(event_queue);
+        event_queue = NULL;
+    }
+
+    syslog(LOG_INFO, "Event system cleaned up");
+}
+
+// Your existing utility functions remain the same...
 static int ax_parameter_get_int(AXParameter* handle, const char* name) {
     gchar* str_value = NULL;
     GError* error    = NULL;
@@ -83,14 +422,11 @@ static int ax_parameter_get_int(AXParameter* handle, const char* name) {
     }
 
     syslog(LOG_INFO, "Axparameter %s: %s", name, str_value);
-
     g_free(str_value);
-
     return value;
 }
 
 static bbox_t* setup_bbox(void) {
-    // Create box drawers
     bbox_t* bbox = bbox_view_new(1u);
     if (!bbox) {
         panic("Failed to create box drawer");
@@ -174,7 +510,7 @@ static void non_maximum_suppression(uint8_t* tensor,
 }
 
 static void filter_detections(uint8_t* tensor,
-                              float conf_theshold,
+                              float conf_threshold,
                               float iou_threshold,
                               model_params_t* model_params,
                               int* invalid_detections) {
@@ -184,7 +520,7 @@ static void filter_detections(uint8_t* tensor,
                                    model_params->quantization_zero_point) *
                                   model_params->quantization_scale;
 
-        if (object_likelihood < conf_theshold) {
+        if (object_likelihood < conf_threshold) {
             invalid_detections[i] = 1;
         } else {
             invalid_detections[i] = 0;
@@ -241,6 +577,7 @@ static void determine_bbox_coordinates(uint8_t* tensor,
     find_corners(x, y, w, h, x1, y1, x2, y2);
 }
 
+// Main function with original detection loop + event thread
 int main(int argc, char** argv) {
     g_autoptr(GError) vdo_error           = NULL;
     img_provider_t* image_provider        = NULL;
@@ -251,6 +588,9 @@ int main(int argc, char** argv) {
     // Stop main loop at signal
     signal(SIGTERM, shutdown);
     signal(SIGINT, shutdown);
+
+    // Initialize event system first (creates the event thread)
+    initialize_event_system();
 
     args_t args;
     parse_args(argc, argv, &args);
@@ -291,7 +631,6 @@ int main(int argc, char** argv) {
 
     float conf_threshold = ax_parameter_get_int(axparameter_handle, "ConfThresholdPercent") / 100.0;
     float iou_threshold  = ax_parameter_get_int(axparameter_handle, "IouThresholdPercent") / 100.0;
-
     ax_parameter_free(axparameter_handle);
 
     VdoFormat vdo_format = VDO_FORMAT_YUV;
@@ -363,6 +702,7 @@ int main(int argc, char** argv) {
     float qt_zero_point    = model_params->quantization_zero_point;
     float qt_scale         = model_params->quantization_scale;
 
+    // 🎯 ORIGINAL DETECTION LOOP REMAINS THE SAME!
     while (running) {
         struct timeval start_ts, end_ts;
         unsigned int preprocessing_ms = 0;
@@ -387,7 +727,7 @@ int main(int argc, char** argv) {
             // No power
             if (!vdo_stream_buffer_unref(image_provider->vdo_stream, &vdo_buf, &vdo_error)) {
                 if (!vdo_error_is_expected(&vdo_error)) {
-                    panic("%s: Unexpexted error: %s", __func__, vdo_error->message);
+                    panic("%s: Unexpected error: %s", __func__, vdo_error->message);
                 }
                 g_clear_error(&vdo_error);
             }
@@ -406,7 +746,7 @@ int main(int argc, char** argv) {
             // No power
             if (!vdo_stream_buffer_unref(image_provider->vdo_stream, &vdo_buf, &vdo_error)) {
                 if (!vdo_error_is_expected(&vdo_error)) {
-                    panic("%s: Unexpexted error: %s", __func__, vdo_error->message);
+                    panic("%s: Unexpected error: %s", __func__, vdo_error->message);
                 }
                 g_clear_error(&vdo_error);
             }
@@ -420,8 +760,6 @@ int main(int argc, char** argv) {
         syslog(LOG_INFO, "Ran inference for %u ms", inference_ms);
 
         total_elapsed_ms = inference_ms + preprocessing_ms;
-
-        // Check if the framerate from vdo should be changed
         img_provider_update_framerate(image_provider, total_elapsed_ms);
 
         for (size_t i = 0; i < number_output_tensors; i++) {
@@ -487,6 +825,9 @@ int main(int argc, char** argv) {
             // No need to compensate for rotation since bbox will handle this
             bbox_coordinates_frame_normalized(bbox);
             bbox_rectangle(bbox, x1, y1, x2, y2);
+
+            // 🎯 QUEUE EVENT FOR DETECTED OBJECT (thread-safe)
+            queue_detection_event(labels[label_idx], highest_class_likelihood, x1, y1, x2, y2);
         }
 
         if (!bbox_commit(bbox, 0u)) {
@@ -496,7 +837,7 @@ int main(int argc, char** argv) {
         // This will allow vdo to fill this buffer with data again
         if (!vdo_stream_buffer_unref(image_provider->vdo_stream, &vdo_buf, &vdo_error)) {
             if (!vdo_error_is_expected(&vdo_error)) {
-                panic("%s: Unexpexted error: %s", __func__, vdo_error->message);
+                panic("%s: Unexpected error: %s", __func__, vdo_error->message);
             }
             g_clear_error(&vdo_error);
         }
@@ -504,6 +845,8 @@ int main(int argc, char** argv) {
 
 end:
     // Cleanup
+    cleanup_event_system();
+
     free(model_params);
     if (image_provider) {
         destroy_img_provider(image_provider);
