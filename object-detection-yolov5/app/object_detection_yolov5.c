@@ -115,15 +115,22 @@ static char* compose_detection_result(const char* object_class,
     if (!json_string)
         return NULL;
 
-    snprintf(json_string,
-             512,
-             "{\"class\":\"%s\",\"confidence\":%.3f,\"bbox\":[%.3f,%.3f,%.3f,%.3f]}",
-             object_class,
-             confidence,
-             x1,
-             y1,
-             x2,
-             y2);
+    int result = snprintf(json_string,
+                          512,
+                          "{\"class\":\"%s\",\"confidence\":%.3f,\"bbox\":[%.3f,%.3f,%.3f,%.3f]}",
+                          object_class,
+                          confidence,
+                          x1,
+                          y1,
+                          x2,
+                          y2);
+
+    if (result < 0 || result >= 1024) {
+        free(json_string);
+        return NULL;
+    }
+
+    syslog(LOG_INFO, "Composed detection result JSON: %s", json_string);
 
     return json_string;
 }
@@ -161,7 +168,7 @@ static void send_object_detection_event(const char* object_class,
     if (!ax_event_key_value_set_add_key_value(key_value_set,
                                               "Result",
                                               NULL,
-                                              (const void**)&detection_result,
+                                              detection_result,
                                               AX_VALUE_TYPE_STRING,
                                               NULL)) {
         syslog(LOG_ERR, "❌ Failed to add Result to event");
