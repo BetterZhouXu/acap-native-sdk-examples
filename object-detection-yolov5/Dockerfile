@@ -40,7 +40,7 @@ COPY ./app .
 RUN . /opt/venv/bin/activate && python parameter_finder.py model/model.tflite
 
 # Build ACAP
-RUN cp manifest.json.${CHIP} manifest.json && \
+RUN cp /opt/app/manifest.json.${CHIP} /opt/app/manifest.json && \
     . /opt/axis/acapsdk/environment-setup* && acap-build . \
-    -a label/labels.txt \
-    -a model/model.tflite
+    -a 'label/labels.txt' \
+    -a 'model/model.tflite'
