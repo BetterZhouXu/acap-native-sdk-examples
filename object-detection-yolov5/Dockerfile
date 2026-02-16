@@ -3,6 +3,7 @@ ARG VERSION=12.8.0
 ARG UBUNTU_VERSION=24.04
 ARG REPO=axisecp
 ARG SDK=acap-native-sdk
+ARG CHIP=artpec8
 
 FROM ${REPO}/${SDK}:${VERSION}-${ARCH}-ubuntu${UBUNTU_VERSION}
 
