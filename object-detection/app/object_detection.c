@@ -38,6 +38,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
@@ -45,7 +46,10 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <syslog.h>
+#include <time.h>
 #include <unistd.h>
+
+#include <curl/curl.h>
 
 #include "argparse.h"
 #include "imgprovider.h"
@@ -56,6 +60,10 @@
 #include "vdo-frame.h"
 #include "vdo-types.h"
 #include <bbox.h>
+
+// Environment variable holding the HTTPS endpoint that detections are POSTed to.
+// Example: export DETECTION_POST_URL="https://example.com/detections"
+#define DETECTION_POST_URL_ENV "kepmpe01.s08299.us.wal-mart.com/detections"
 
 volatile sig_atomic_t running = 1;
 
@@ -72,6 +80,113 @@ typedef struct {
 static void shutdown(int status) {
     (void)status;
     running = 0;
+}
+
+/**
+ * @brief Silently discard any response body from the HTTPS server.
+ */
+static size_t discard_response_cb(void* ptr, size_t size, size_t nmemb, void* userdata) {
+    (void)ptr;
+    (void)userdata;
+    return size * nmemb;
+}
+
+/**
+ * @brief POST a single detection result as JSON to the configured HTTPS URL.
+ *
+ * The URL is read from the DETECTION_POST_URL environment variable. If it is
+ * not set, this function is a no-op. Any transport errors are logged but do
+ * not stop the detection pipeline.
+ *
+ * @param url    Target HTTPS endpoint (must be non-NULL).
+ * @param index  Index of the detection in the current frame.
+ * @param label  Human-readable class label.
+ * @param score  Detection confidence in [0.0, 1.0].
+ * @param top    Normalized top    coordinate of the bounding box.
+ * @param left   Normalized left   coordinate of the bounding box.
+ * @param bottom Normalized bottom coordinate of the bounding box.
+ * @param right  Normalized right  coordinate of the bounding box.
+ * @return true on success, false on failure.
+ */
+static bool send_detection_https(const char* url,
+                                 int index,
+                                 const char* label,
+                                 float score,
+                                 float top,
+                                 float left,
+                                 float bottom,
+                                 float right) {
+    if (!url || !*url) {
+        return false;
+    }
+
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        syslog(LOG_ERR, "curl_easy_init failed");
+        return false;
+    }
+
+    // Build a compact JSON body describing the detection.
+    char body[512];
+    int n = snprintf(body,
+                     sizeof(body),
+                     "{\"index\":%d,\"label\":\"%s\",\"score\":%.4f,"
+                     "\"bbox\":{\"top\":%.6f,\"left\":%.6f,"
+                     "\"bottom\":%.6f,\"right\":%.6f},"
+                     "\"timestamp\":%ld}",
+                     index,
+                     label ? label : "",
+                     (double)score,
+                     (double)top,
+                     (double)left,
+                     (double)bottom,
+                     (double)right,
+                     (long)time(NULL));
+    if (n < 0 || (size_t)n >= sizeof(body)) {
+        syslog(LOG_ERR, "Detection JSON truncated");
+        curl_easy_cleanup(curl);
+        return false;
+    }
+
+    struct curl_slist* headers = NULL;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    headers = curl_slist_append(headers, "Expect:");
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)n);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, discard_response_cb);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 3L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "acap-object-detection/1.0");
+    // HTTPS peer/host verification is on by default; leave it enabled.
+
+    CURLcode rc = curl_easy_perform(curl);
+    bool ok    = (rc == CURLE_OK);
+    if (!ok) {
+        syslog(LOG_WARNING,
+               "Failed to POST detection to %s: %s",
+               url,
+               curl_easy_strerror(rc));
+    } else {
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        if (http_code >= 400) {
+            syslog(LOG_WARNING,
+                   "Server %s responded with HTTP %ld for detection %d",
+                   url,
+                   http_code,
+                   index);
+            ok = false;
+        }
+    }
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    return ok;
 }
 
 static bbox_t* setup_bbox(uint32_t channel) {
@@ -98,6 +213,7 @@ static bool parse_and_postprocess_output_tensors(bbox_t* bbox,
                                                  unsigned int* post_processing_ms) {
     box* boxes = NULL;
     struct timeval start_ts, end_ts;
+    const char* post_url = getenv(DETECTION_POST_URL_ENV);
 
     // From here this is different dependent on model
     float* locations = (float*)tensor_outputs[0].data;
@@ -149,6 +265,16 @@ static bool parse_and_postprocess_output_tensors(bbox_t* bbox,
                    right);
             bbox_coordinates_frame_normalized(bbox);
             bbox_rectangle(bbox, left, top, right, bottom);
+
+            // Forward this detection to the configured HTTPS endpoint (if any).
+            send_detection_https(post_url,
+                                 i,
+                                 labels[boxes[i].label],
+                                 boxes[i].score,
+                                 top,
+                                 left,
+                                 bottom,
+                                 right);
         }
     }
 
@@ -179,6 +305,30 @@ int main(int argc, char** argv) {
 
     args_t args;
     parse_args(argc, argv, &args);
+
+    // Global libcurl init for the HTTPS detection reporter.
+    if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
+        syslog(LOG_WARNING, "curl_global_init failed; HTTPS reporting disabled");
+    } else {
+        const char* post_url = getenv(DETECTION_POST_URL_ENV);
+        if (post_url && *post_url) {
+            syslog(LOG_INFO, "Detections will be POSTed to %s", post_url);
+        } else {
+            syslog(LOG_INFO,
+                   "%s not set; HTTPS reporting disabled",
+                   DETECTION_POST_URL_ENV);
+        }
+    }
+
+    # test the send_detection_https
+    send_detection_https(getenv(DETECTION_POST_URL_ENV),)
+                         0,
+                         "test_label",
+                         0.95f,
+                         0.1f,
+                         0.2f,
+                         0.3f,
+                         0.4f);
 
     char* device_name          = args.device_name;
     char* model_file           = args.model_file;
@@ -314,6 +464,8 @@ int main(int argc, char** argv) {
     if (parse_tensors) {
         bbox_destroy(bbox);
     }
+
+    curl_global_cleanup();
 
     syslog(LOG_INFO, "Exit %s", argv[0]);
     return 0;

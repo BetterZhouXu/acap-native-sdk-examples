@@ -3,7 +3,7 @@ OBJS1	= $(PROG1).c argparse.c imgprovider.c labelparse.c model.c panic.c
 PROGS	= $(PROG1)
 DEBUG_DIR = debug
 
-PKGS = bbox gio-2.0 gio-unix-2.0 liblarod vdostream
+PKGS = bbox gio-2.0 gio-unix-2.0 liblarod vdostream libcurl
 
 LDLIBS += -lm
 
