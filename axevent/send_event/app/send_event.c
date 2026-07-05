@@ -34,7 +34,7 @@
 
 // Target HTTPS endpoint for the fake-detection test.
 // Edit this to point at your server (must start with https:// or http://).
-#define DETECTION_POST_URL "https://kepmpe01.s08299.us.wal-mart.com/testaxis"
+#define DETECTION_POST_URL "https://55.128.197.187:8080/testaxis"
 // How often to fire a fake detection event (seconds).
 #define FAKE_DETECTION_PERIOD_S 5
 
