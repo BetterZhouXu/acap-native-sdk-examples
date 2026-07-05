@@ -4,7 +4,7 @@ OBJS1	= $(PROG1).c
 PROGS	= $(PROG1)
 DEBUG_DIR = debug
 
-PKGS = glib-2.0 axevent
+PKGS = glib-2.0 axevent libcurl
 CFLAGS += $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) pkg-config --cflags $(PKGS))
 LDLIBS += $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) pkg-config --libs $(PKGS))
 
