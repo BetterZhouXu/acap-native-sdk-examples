@@ -24,13 +24,14 @@
  */
 #include <axsdk/axevent.h>
 #include <errno.h>
+#include <fcgi_stdio.h>
 #include <fcntl.h>
 #include <glib-object.h>
 #include <glib.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <syslog.h>
@@ -41,13 +42,17 @@
 #define FAKE_DETECTION_PERIOD_S 5
 
 // Per-app persistent data directory (survives upgrades and reboots).
-// Events are appended as JSON Lines; the events.cgi handler atomically
+// Events are appended as JSON Lines; the FastCGI handler atomically
 // drains this file when a collector reads /local/send_event/events.cgi.
-#define EVENT_LOG_DIR  "/usr/local/packages/send_event/localdata/events"
-#define EVENT_LOG_PATH EVENT_LOG_DIR "/events.jsonl"
+#define EVENT_LOG_DIR   "/usr/local/packages/send_event/localdata/events"
+#define EVENT_LOG_PATH  EVENT_LOG_DIR "/events.jsonl"
+#define EVENT_LOG_STAGE EVENT_LOG_DIR "/events.draining.jsonl"
 // Soft cap so an unreachable collector can't fill flash. Writes past this
 // point are dropped (with a rate-limited warning) until the file is drained.
 #define EVENT_LOG_MAX  (5 * 1024 * 1024)   // 5 MiB
+
+// Set by the ACAP runtime for apps configured with httpConfig type fastCgi.
+#define FCGI_SOCKET_ENV "FCGI_SOCKET_NAME"
 
 typedef struct {
     AXEventHandler* event_handler;
@@ -62,6 +67,10 @@ typedef struct {
 } FakeSenderCtx;
 
 static AppData* app_data = NULL;
+
+// The GLib timer and FastCGI request handler run in the same process.
+// Serialize queue file access with an in-process mutex.
+static pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* -------------------------------------------------------------------------- */
 /* Local JSON-lines event queue                                               */
@@ -81,15 +90,12 @@ static void ensure_event_log_dir(void) {
 /**
  * brief Append one JSON line to the local event queue.
  *
- * Uses flock() so that concurrent events.cgi rotations are safe:
- *   - writer holds LOCK_EX around the append
- *   - drainer holds LOCK_EX around its rename+truncate
- * The rename() itself is atomic on the same filesystem, so no in-flight
- * write is ever lost and no line is ever partially captured.
- *
  * Refuses to grow past EVENT_LOG_MAX so a dead collector can't fill flash.
  */
 static gboolean append_event_line(const char* json, size_t len) {
+    gboolean ok = FALSE;
+    pthread_mutex_lock(&queue_lock);
+
     struct stat st;
     if (stat(EVENT_LOG_PATH, &st) == 0 && st.st_size >= EVENT_LOG_MAX) {
         static time_t last_warn = 0;
@@ -100,30 +106,32 @@ static gboolean append_event_line(const char* json, size_t len) {
                    (long long)st.st_size);
             last_warn = now;
         }
-        return FALSE;
+        goto out;
     }
 
     int fd = open(EVENT_LOG_PATH,
                   O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0640);
     if (fd < 0) {
         syslog(LOG_WARNING, "open %s: %m", EVENT_LOG_PATH);
-        return FALSE;
+        goto out;
     }
 
-    flock(fd, LOCK_EX);
     struct iovec iov[2] = {
         { .iov_base = (void*)json, .iov_len = len },
         { .iov_base = (void*)"\n", .iov_len = 1  },
     };
     ssize_t n = writev(fd, iov, 2);
-    flock(fd, LOCK_UN);
     close(fd);
 
     if (n < 0) {
         syslog(LOG_WARNING, "write %s: %m", EVENT_LOG_PATH);
-        return FALSE;
+        goto out;
     }
-    return TRUE;
+    ok = TRUE;
+
+out:
+    pthread_mutex_unlock(&queue_lock);
+    return ok;
 }
 
 /**
@@ -162,6 +170,136 @@ static gboolean fake_detection_timer_cb(gpointer user_data) {
     FakeSenderCtx* ctx = (FakeSenderCtx*)user_data;
     generate_fake_detection(ctx->counter++);
     return G_SOURCE_CONTINUE;
+}
+
+/* -------------------------------------------------------------------------- */
+/* FastCGI drain endpoint                                                     */
+/* -------------------------------------------------------------------------- */
+
+static void fcgi_headers(FCGX_Request* req,
+                         const char* status,
+                         const char* content_type,
+                         long content_length) {
+    FCGX_FPrintF(req->out, "Status: %s\r\n", status);
+    FCGX_FPrintF(req->out, "Content-Type: %s\r\n", content_type);
+    FCGX_FPrintF(req->out, "Cache-Control: no-store\r\n");
+    FCGX_FPrintF(req->out, "Connection: close\r\n");
+    if (content_length >= 0) {
+        FCGX_FPrintF(req->out, "Content-Length: %ld\r\n", content_length);
+    }
+    FCGX_FPrintF(req->out, "\r\n");
+}
+
+static void fcgi_no_content(FCGX_Request* req) {
+    FCGX_FPrintF(req->out,
+                 "Status: 204 No Content\r\n"
+                 "Cache-Control: no-store\r\n"
+                 "Connection: close\r\n\r\n");
+}
+
+static void fcgi_handle_request(FCGX_Request* req) {
+    const char* method = FCGX_GetParam("REQUEST_METHOD", req->envp);
+    const char* query  = FCGX_GetParam("QUERY_STRING", req->envp);
+
+    if (query && strstr(query, "debug=1")) {
+        struct stat st;
+        long size = (stat(EVENT_LOG_PATH, &st) == 0) ? (long)st.st_size : -1;
+        fcgi_headers(req, "200 OK", "text/plain", -1);
+        FCGX_FPrintF(req->out,
+                     "events fastCgi probe\n"
+                     "pid=%d\nuid=%d\nqueue=%s\nqueue_size=%ld\nmethod=%s\n",
+                     (int)getpid(),
+                     (int)geteuid(),
+                     EVENT_LOG_PATH,
+                     size,
+                     method ? method : "unset");
+        return;
+    }
+
+    if (method && strcmp(method, "HEAD") == 0) {
+        struct stat st;
+        if (stat(EVENT_LOG_PATH, &st) == 0 && st.st_size > 0) {
+            fcgi_headers(req, "200 OK", "application/x-ndjson", (long)st.st_size);
+        } else {
+            fcgi_no_content(req);
+        }
+        return;
+    }
+
+    if (method && strcmp(method, "GET") != 0 && strcmp(method, "POST") != 0) {
+        FCGX_FPrintF(req->out,
+                     "Status: 405 Method Not Allowed\r\n"
+                     "Allow: GET, HEAD\r\n\r\n");
+        return;
+    }
+
+    pthread_mutex_lock(&queue_lock);
+
+    struct stat st;
+    if (stat(EVENT_LOG_PATH, &st) != 0 || st.st_size == 0) {
+        pthread_mutex_unlock(&queue_lock);
+        fcgi_no_content(req);
+        return;
+    }
+
+    unlink(EVENT_LOG_STAGE);
+    if (rename(EVENT_LOG_PATH, EVENT_LOG_STAGE) != 0) {
+        pthread_mutex_unlock(&queue_lock);
+        syslog(LOG_WARNING, "rename %s -> %s: %m", EVENT_LOG_PATH, EVENT_LOG_STAGE);
+        fcgi_headers(req, "500 Internal Server Error", "text/plain", -1);
+        FCGX_FPrintF(req->out, "rename failed\n");
+        return;
+    }
+
+    pthread_mutex_unlock(&queue_lock);
+
+    long size = (stat(EVENT_LOG_STAGE, &st) == 0) ? (long)st.st_size : -1;
+    fcgi_headers(req, "200 OK", "application/x-ndjson", size);
+
+    FILE* fp = fopen(EVENT_LOG_STAGE, "rb");
+    if (fp) {
+        char buf[4096];
+        size_t nread;
+        while ((nread = fread(buf, 1, sizeof(buf), fp)) > 0) {
+            FCGX_PutStr(buf, (int)nread, req->out);
+        }
+        fclose(fp);
+    } else {
+        syslog(LOG_WARNING, "fopen %s: %m", EVENT_LOG_STAGE);
+    }
+    unlink(EVENT_LOG_STAGE);
+}
+
+static void* fcgi_thread_main(void* arg) {
+    const char* socket_path = (const char*)arg;
+
+    if (FCGX_Init() != 0) {
+        syslog(LOG_ERR, "FCGX_Init failed");
+        return NULL;
+    }
+
+    int sock = FCGX_OpenSocket(socket_path, 5);
+    if (sock < 0) {
+        syslog(LOG_ERR, "FCGX_OpenSocket(%s) failed", socket_path);
+        return NULL;
+    }
+    chmod(socket_path, S_IRWXU | S_IRWXG | S_IRWXO);
+
+    FCGX_Request req;
+    if (FCGX_InitRequest(&req, sock, 0) != 0) {
+        syslog(LOG_ERR, "FCGX_InitRequest failed");
+        return NULL;
+    }
+
+    syslog(LOG_INFO, "FastCGI drain endpoint listening on %s", socket_path);
+
+    while (FCGX_Accept_r(&req) == 0) {
+        fcgi_handle_request(&req);
+        FCGX_Finish_r(&req);
+    }
+
+    syslog(LOG_INFO, "FastCGI thread exiting");
+    return NULL;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -320,6 +458,7 @@ gint main(void) {
     gdouble start_value    = 0.0;
     FakeSenderCtx fake_ctx = {0};
     guint fake_timer_id    = 0;
+    pthread_t fcgi_thread  = 0;
 
     syslog(LOG_INFO, "Started logging from send event application");
 
@@ -327,6 +466,18 @@ gint main(void) {
     ensure_event_log_dir();
     syslog(LOG_INFO, "Local event queue: %s (cap %d bytes)",
            EVENT_LOG_PATH, EVENT_LOG_MAX);
+
+    // Start FastCGI endpoint if the ACAP runtime supplied the socket path.
+    const char* fcgi_socket = getenv(FCGI_SOCKET_ENV);
+    if (fcgi_socket && *fcgi_socket) {
+        if (pthread_create(&fcgi_thread, NULL, fcgi_thread_main, (void*)fcgi_socket) == 0) {
+            pthread_detach(fcgi_thread);
+        } else {
+            syslog(LOG_ERR, "pthread_create(fcgi): %m");
+        }
+    } else {
+        syslog(LOG_WARNING, "%s unset; FastCGI drain endpoint disabled", FCGI_SOCKET_ENV);
+    }
 
     // Start the fake-detection generator: every FAKE_DETECTION_PERIOD_S
     // it appends one JSON line to the local queue.

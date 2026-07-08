@@ -15,7 +15,7 @@
                 {
                     "access": "admin",
                     "name": "events.cgi",
-                    "type": "transferCgi"
+                    "type": "fastCgi"
                 }
             ]
         }
