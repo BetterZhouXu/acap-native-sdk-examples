@@ -21,13 +21,18 @@ CFLAGS += -Wall \
           -W \
           -Werror
 
-all:	$(PROGS)
+all:	$(PROGS) events.cgi
 
 $(PROG1): $(OBJS1)
 	install -d $(DEBUG_DIR)
 	$(CC) $^ $(CFLAGS) $(LIBS) $(LDFLAGS) -lm $(LDLIBS) -o $(DEBUG_DIR)/$@
 	cp $(DEBUG_DIR)/$@ .
 	$(STRIP) $@
+
+# Ensure the drain CGI ships with the executable bit set inside the .eap
+# so acap-build packs it as an executable transferCgi handler.
+events.cgi:
+	chmod 0755 events.cgi
 
 clean:
 	rm -rf $(PROGS) *.o *.eap* *_LICENSE.txt package.conf* param.conf tmp* $(DEBUG_DIR)

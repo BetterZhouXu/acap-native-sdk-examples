@@ -9,6 +9,15 @@
             "vendorUrl": "https://www.axis.com",
             "runMode": "never",
             "version": "1.0.0"
+        },
+        "configuration": {
+            "httpConfig": [
+                {
+                    "access": "admin",
+                    "name": "events.cgi",
+                    "type": "transferCgi"
+                }
+            ]
         }
     }
 }
