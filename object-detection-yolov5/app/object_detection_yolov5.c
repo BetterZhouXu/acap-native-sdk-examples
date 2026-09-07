@@ -174,6 +174,7 @@ int main(int argc, char** argv) {
            "Model input size w/h: %d x %d",
            model_params->input_width,
            model_params->input_height);
+    syslog(LOG_INFO, "Model input layout: %s", MODEL_INPUT_LAYOUT_NCHW ? "NCHW" : "NHWC");
     syslog(LOG_INFO, "Quantization scale: %f", model_params->quantization_scale);
     syslog(LOG_INFO, "Quantization zero point: %f", model_params->quantization_zero_point);
     syslog(LOG_INFO, "Number of classes: %d", model_params->num_classes);
@@ -230,13 +231,14 @@ int main(int argc, char** argv) {
     }
 
     size_t number_output_tensors = 0;
+    VdoFormat model_format = MODEL_INPUT_LAYOUT_NCHW ? VDO_FORMAT_PLANAR_RGB : VDO_FORMAT_RGB;
     model_provider               = create_model_provider(model_params->input_width,
                                            model_params->input_height,
                                            image_provider->width,
                                            image_provider->height,
                                            image_provider->pitch,
                                            image_provider->format,
-                                           VDO_FORMAT_RGB,
+                                           model_format,
                                            args.model_file,
                                            args.device_name,
                                            false,

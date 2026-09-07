@@ -418,7 +418,7 @@ model_provider_t* create_model_provider(unsigned int input_width,
                   &provider->num_inputs,
                   &provider->output_tensors,
                   &provider->num_outputs);
-    if (provider->num_inputs > 1) {
+    if (provider->num_inputs != 1) {
         panic("%s Currently only 1 input tensor is supported but %zu was received",
               __func__,
               provider->num_inputs);
@@ -428,14 +428,19 @@ model_provider_t* create_model_provider(unsigned int input_width,
     if (!input_dims) {
         panic("%s: Failed retrieving dim for input tensor: %s", __func__, error->msg);
     }
+    if (input_dims->len != 4 || input_dims->dims[0] != 1) {
+        panic("%s: Expected a rank-four input with batch size one", __func__);
+    }
     uint32_t expected_input_width  = 0;
     uint32_t expected_input_height = 0;
     larodTensorLayout model_layout = LAROD_TENSOR_LAYOUT_UNSPECIFIED;
     if (model_format == VDO_FORMAT_RGB) {
+        if (input_dims->dims[3] != 3) panic("Expected NHWC input [1,H,W,3]");
         expected_input_width  = input_dims->dims[2];
         expected_input_height = input_dims->dims[1];
         model_layout          = LAROD_TENSOR_LAYOUT_NHWC;
     } else if (model_format == VDO_FORMAT_PLANAR_RGB) {
+        if (input_dims->dims[1] != 3) panic("Expected NCHW input [1,3,H,W]");
         expected_input_width  = input_dims->dims[3];
         expected_input_height = input_dims->dims[2];
         model_layout          = LAROD_TENSOR_LAYOUT_NCHW;
@@ -455,6 +460,7 @@ model_provider_t* create_model_provider(unsigned int input_width,
     if (!input_pitches) {
         panic("%s: Failed retrieving pitches for input tensor: %s", __func__, error->msg);
     }
+    if (input_pitches->len != 4) panic("Expected rank-four input pitch metadata");
     uint32_t expected_input_pitch = 0;
     if (model_format == VDO_FORMAT_RGB) {
         expected_input_pitch = input_pitches->pitches[2];

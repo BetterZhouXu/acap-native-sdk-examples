@@ -26,14 +26,23 @@ Supply these files before building (no default model is downloaded):
 
 The model must have:
 
-- One static **uint8 RGB NHWC input** `[1, height, width, 3]` accepting raw RGB
-  bytes from the existing VDO preprocessing pipeline. Float32/int8 inputs require
+- One static **uint8 RGB input**, either NHWC `[1, height, width, 3]` or NCHW
+  `[1, 3, height, width]`, accepting raw RGB bytes from VDO preprocessing. The
+  build detects the layout automatically and selects interleaved or planar RGB
+  preprocessing respectively. Float32/int8 inputs require
   different input conversion and are rejected rather than silently misinterpreted.
 - One tightly packed **channel-major output `[1, 9, 18900]`**. Channels 0–3 are
   `cx, cy, width, height`; channels 4–7 are the four class probabilities; channel
   8 is the already-decoded angle in **radians**. There is **no objectness channel**.
 - Output float32, uint8, or int8. Quantized outputs must have per-tensor scale and
   zero point. Build-time inspection does not allocate/run model tensors.
+
+The build prints each input/output tensor's shape and datatype before validation.
+An input-shape error refers to the image input, not the `[1, 9, 18900]` detection
+output. Rebuild after replacing a model so dimensions and input layout are
+regenerated. If validation still fails, use the printed tensor metadata to check
+the export; do not bypass datatype validation. CUDA/oneDNN and interpreter
+deprecation warnings are unrelated to shape validation and do not require a GPU.
 
 Shape alone cannot establish coordinate units. Set `OBB_COORDINATES=normalized`
 for exports whose x/width are normalized by input width and y/height by input
