@@ -29,8 +29,7 @@ void parse_labels(char*** labels_ptr,
                   char** label_file_buffer,
                   const char* labels_path,
                   size_t* num_labels_ptr) {
-    // We cut off every row at 60 characters.
-    const size_t LINE_MAX_LEN = 60;
+    const size_t LINE_MAX_LEN = 256;
     char* labels_data         = NULL;  // Buffer containing the label file contents.
     char** label_array        = NULL;  // Pointers to each line in the labels text.
 
@@ -47,7 +46,7 @@ void parse_labels(char*** labels_ptr,
     // 64-bit depending on architecture. We just check toward 10 MByte as we
     // will not encounter larger label files and both off_t and size_t should be
     // able to represent 10 megabytes on both 32-bit and 64-bit systems.
-    if (file_stats.st_size > (10 * 1024 * 1024)) {
+    if (file_stats.st_size <= 0 || file_stats.st_size > (10 * 1024 * 1024)) {
         panic("%s: failed sanity check on labels file size", __func__);
     }
 
@@ -69,12 +68,14 @@ void parse_labels(char*** labels_ptr,
     while (total_bytes_read < labels_file_size) {
         num_bytes_read = read(labels_fd, file_read_ptr, labels_file_size - total_bytes_read);
 
+        if (num_bytes_read < 0 && errno == EINTR) continue;
         if (num_bytes_read < 1) {
             panic("%s: Failed reading from labels file: %s", __func__, strerror(errno));
         }
         total_bytes_read += (size_t)num_bytes_read;
         file_read_ptr += num_bytes_read;
     }
+    if (memchr(labels_data, '\0', labels_file_size)) panic("Labels contain embedded NUL bytes");
 
     // Now count number of lines in the file - check all bytes except the last
     // one in the file.
@@ -114,26 +115,17 @@ void parse_labels(char*** labels_ptr,
     // contents.
     labels_data[labels_file_size] = '\0';
 
-    // Now go through the list of strings and cap if strings too long.
+    // Preserve class indices; do not drop COCO-style n/a labels or truncate UTF-8.
     for (size_t i = 0; i < num_lines; i++) {
-        size_t string_len = strnlen(label_array[i], LINE_MAX_LEN);
-        if (string_len >= LINE_MAX_LEN) {
-            // Just insert capping NULL terminator to limit the string len.
-            *(label_array[i] + LINE_MAX_LEN + 1) = '\0';
-        }
-    }
-
-    // Filter out "n/a" entries by compacting the array.
-    size_t valid_label_count = 0;
-    for (size_t i = 0; i < num_lines; i++) {
-        if (strcmp(label_array[i], "n/a") != 0) {
-            label_array[valid_label_count] = label_array[i];
-            valid_label_count++;
-        }
+        size_t string_len = strlen(label_array[i]);
+        if (string_len && label_array[i][string_len - 1] == '\r')
+            label_array[i][--string_len] = '\0';
+        if (!string_len || string_len > LINE_MAX_LEN)
+            panic("Labels must be nonempty and at most %zu bytes", LINE_MAX_LEN);
     }
 
     *labels_ptr        = label_array;
-    *num_labels_ptr    = valid_label_count;
+    *num_labels_ptr    = num_lines;
     *label_file_buffer = labels_data;
 
     close(labels_fd);

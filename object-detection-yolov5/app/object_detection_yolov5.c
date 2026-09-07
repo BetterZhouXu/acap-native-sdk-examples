@@ -15,11 +15,10 @@
  */
 
 /**
- * - object_detection_bbox_yolov5 -
+ * - YOLOv8 oriented object detection and JSONL events -
  *
- * This application loads a larod YOLOv5 model which takes an image as input. The output is
- * YOLOv5-specifically parsed to retrieve values corresponding to the class, score and location of
- * detected objects in the image.
+ * Loads a larod YOLOv8 OBB model with output [1, 9, 18900], draws oriented boxes,
+ * and serves saved detections at /local/detection/events.cgi.
  *
  * The application expects two arguments on the command line in the
  * following order: MODELFILE LABELSFILE.
@@ -31,6 +30,7 @@
  */
 
 #include "argparse.h"
+#include "events.h"
 #include "imgprovider.h"
 #include "labelparse.h"
 #include "model.h"
@@ -48,7 +48,7 @@
 #include <sys/time.h>
 #include <syslog.h>
 
-#define APP_NAME "object_detection_yolov5"
+#define APP_NAME "detection"
 
 volatile sig_atomic_t running = 1;
 
@@ -64,7 +64,6 @@ typedef struct model_params {
     float quantization_zero_point;
     int num_classes;
     int num_detections;
-    int size_per_detection;
 } model_params_t;
 
 static int ax_parameter_get_int(AXParameter* handle, const char* name) {
@@ -111,134 +110,32 @@ static unsigned int elapsed_ms(struct timeval* start_ts, struct timeval* end_ts)
                           ((end_ts->tv_usec - start_ts->tv_usec) / 1000));
 }
 
-static float intersection_over_union(float x1,
-                                     float y1,
-                                     float w1,
-                                     float h1,
-                                     float x2,
-                                     float y2,
-                                     float w2,
-                                     float h2) {
-    float xx1 = fmax(x1 - (w1 / 2), x2 - (w2 / 2));
-    float yy1 = fmax(y1 - (h1 / 2), y2 - (h2 / 2));
-    float xx2 = fmin(x1 + (w1 / 2), x2 + (w2 / 2));
-    float yy2 = fmin(y1 + (h1 / 2), y2 + (h2 / 2));
-
-    float inter_area = fmax(0, xx2 - xx1) * fmax(0, yy2 - yy1);
-    float union_area = w1 * h1 + w2 * h2 - inter_area;
-
-    return inter_area / union_area;
-}
-
-static void non_maximum_suppression(uint8_t* tensor,
-                                    float iou_threshold,
-                                    model_params_t* model_params,
-                                    int* invalid_detections) {
-    int size_per_detection = model_params->size_per_detection;
-    int num_detections     = model_params->num_detections;
-    float qt_zero_point    = model_params->quantization_zero_point;
-    float qt_scale         = model_params->quantization_scale;
-
-    for (int i = 0; i < num_detections; i++) {
-        if (invalid_detections[i])  // Skip comparison if detection is already invalid
-            continue;
-
-        float x1                 = (tensor[size_per_detection * i + 0] - qt_zero_point) * qt_scale;
-        float y1                 = (tensor[size_per_detection * i + 1] - qt_zero_point) * qt_scale;
-        float w1                 = (tensor[size_per_detection * i + 2] - qt_zero_point) * qt_scale;
-        float h1                 = (tensor[size_per_detection * i + 3] - qt_zero_point) * qt_scale;
-        float object1_likelihood = (tensor[size_per_detection * i + 4] - qt_zero_point) * qt_scale;
-
-        for (int j = i + 1; j < num_detections; j++) {
-            if (invalid_detections[j])  // Skip comparison if detection is already invalid
-                continue;
-
-            float x2 = (tensor[size_per_detection * j + 0] - qt_zero_point) * qt_scale;
-            float y2 = (tensor[size_per_detection * j + 1] - qt_zero_point) * qt_scale;
-            float w2 = (tensor[size_per_detection * j + 2] - qt_zero_point) * qt_scale;
-            float h2 = (tensor[size_per_detection * j + 3] - qt_zero_point) * qt_scale;
-            float object2_likelihood =
-                (tensor[size_per_detection * j + 4] - qt_zero_point) * qt_scale;
-
-            if (intersection_over_union(x1, y1, w1, h1, x2, y2, w2, h2) > iou_threshold) {
-                // invalidates the detection with lowest object likelihood score
-                if (object1_likelihood > object2_likelihood) {
-                    invalid_detections[j] = 1;
-                } else {
-                    invalid_detections[i] = 1;
-                    break;
-                }
+static void draw_obb(bbox_t* bbox, const obb_detection_t* detection) {
+    bbox_coordinates_frame_normalized(bbox);
+    for (int i = 0; i < 4; ++i) {
+        obb_point_t a = detection->corners[i], b = detection->corners[(i + 1) % 4];
+        float x = a.x / MODEL_INPUT_WIDTH, y = a.y / MODEL_INPUT_HEIGHT;
+        float dx = (b.x - a.x) / MODEL_INPUT_WIDTH;
+        float dy = (b.y - a.y) / MODEL_INPUT_HEIGHT;
+        /* Clip each rotated edge to the viewport without distorting its angle. */
+        float p[4] = {-dx, dx, -dy, dy};
+        float q[4] = {x, 1 - x, y, 1 - y};
+        float first = 0, last = 1;
+        bool visible = true;
+        for (int j = 0; j < 4; ++j) {
+            if (fabsf(p[j]) < 1e-8f) {
+                if (q[j] < 0) visible = false;
+            } else if (p[j] < 0) {
+                first = fmaxf(first, q[j] / p[j]);
+            } else {
+                last = fminf(last, q[j] / p[j]);
             }
         }
+        if (!visible || first > last) continue;
+        bbox_move_to(bbox, CLAMP(x + first * dx, 0, 1), CLAMP(y + first * dy, 0, 1));
+        bbox_line_to(bbox, CLAMP(x + last * dx, 0, 1), CLAMP(y + last * dy, 0, 1));
+        bbox_draw_path(bbox);
     }
-}
-
-static void filter_detections(uint8_t* tensor,
-                              float conf_threshold,
-                              float iou_threshold,
-                              model_params_t* model_params,
-                              int* invalid_detections) {
-    // Filter boxes by confidence
-    for (int i = 0; i < model_params->num_detections; i++) {
-        float object_likelihood = (tensor[model_params->size_per_detection * i + 4] -
-                                   model_params->quantization_zero_point) *
-                                  model_params->quantization_scale;
-
-        if (object_likelihood < conf_threshold) {
-            invalid_detections[i] = 1;
-        } else {
-            invalid_detections[i] = 0;
-        }
-    }
-
-    non_maximum_suppression(tensor, iou_threshold, model_params, invalid_detections);
-}
-
-static void determine_class_and_object_likelihood(uint8_t* tensor,
-                                                  int detection_idx,
-                                                  int size_per_detection,
-                                                  float qt_zero_point,
-                                                  float qt_scale,
-                                                  float* highest_class_likelihood,
-                                                  int* label_idx,
-                                                  float* object_likelihood) {
-    // Find what class this object is
-    for (int j = 5; j < size_per_detection; j++) {
-        float class_likelihood =
-            (tensor[size_per_detection * detection_idx + j] - qt_zero_point) * qt_scale;
-        if (class_likelihood > *highest_class_likelihood) {
-            *highest_class_likelihood = class_likelihood;
-            *label_idx                = j - 5;
-        }
-    }
-
-    *object_likelihood =
-        (tensor[size_per_detection * detection_idx + 4] - qt_zero_point) * qt_scale;
-}
-
-static void
-find_corners(float x, float y, float w, float h, float* x1, float* y1, float* x2, float* y2) {
-    *x1 = fmax(0.0, x - (w / 2));
-    *y1 = fmax(0.0, y - (h / 2));
-    *x2 = fmin(1.0, x + (w / 2));
-    *y2 = fmin(1.0, y + (h / 2));
-}
-
-static void determine_bbox_coordinates(uint8_t* tensor,
-                                       int detection_idx,
-                                       int size_per_detection,
-                                       float qt_zero_point,
-                                       float qt_scale,
-                                       float* x1,
-                                       float* y1,
-                                       float* x2,
-                                       float* y2) {
-    // Get coordinates for the object
-    float x = (tensor[size_per_detection * detection_idx + 0] - qt_zero_point) * qt_scale;
-    float y = (tensor[size_per_detection * detection_idx + 1] - qt_zero_point) * qt_scale;
-    float w = (tensor[size_per_detection * detection_idx + 2] - qt_zero_point) * qt_scale;
-    float h = (tensor[size_per_detection * detection_idx + 3] - qt_zero_point) * qt_scale;
-    find_corners(x, y, w, h, x1, y1, x2, y2);
 }
 
 int main(int argc, char** argv) {
@@ -247,6 +144,10 @@ int main(int argc, char** argv) {
     model_provider_t* model_provider      = NULL;
     model_tensor_output_t* tensor_outputs = NULL;
     bbox_t* bbox                          = NULL;
+    char** labels = NULL;
+    char* label_file_data = NULL;
+    size_t num_labels = 0;
+    int exit_status = EXIT_FAILURE;
 
     // Stop main loop at signal
     signal(SIGTERM, shutdown);
@@ -254,6 +155,7 @@ int main(int argc, char** argv) {
 
     args_t args;
     parse_args(argc, argv, &args);
+    if (!events_start()) panic("Failed to start detection result store/FastCGI server");
 
     model_params_t* model_params = (model_params_t*)malloc(sizeof(model_params_t));
     if (model_params == NULL) {
@@ -267,9 +169,6 @@ int main(int argc, char** argv) {
     model_params->quantization_zero_point = QUANTIZATION_ZERO_POINT;
     model_params->num_classes             = NUM_CLASSES;
     model_params->num_detections          = NUM_DETECTIONS;
-    model_params->size_per_detection =
-        5 + NUM_CLASSES;  // Each detection consists of [x, y, w, h, object_likelihood,
-                          // class1_likelihood, class2_likelihood, class3_likelihood, ... ]
 
     syslog(LOG_INFO,
            "Model input size w/h: %d x %d",
@@ -280,7 +179,12 @@ int main(int argc, char** argv) {
     syslog(LOG_INFO, "Number of classes: %d", model_params->num_classes);
     syslog(LOG_INFO, "Number of detections: %d", model_params->num_detections);
 
-    int invalid_detections[model_params->num_detections];
+    obb_config_t obb_config = {
+        .candidates = NUM_DETECTIONS, .classes = NUM_CLASSES,
+        .input_width = MODEL_INPUT_WIDTH, .input_height = MODEL_INPUT_HEIGHT,
+        .dtype = MODEL_OUTPUT_DTYPE, .scale = QUANTIZATION_SCALE,
+        .zero_point = QUANTIZATION_ZERO_POINT, .normalized = MODEL_COORDINATES_NORMALIZED};
+    obb_detection_t detections[OBB_MAX_DETECTIONS];
 
     // Create a new axparameter instance
     GError* axparameter_error       = NULL;
@@ -340,17 +244,24 @@ int main(int argc, char** argv) {
     if (!model_provider) {
         panic("%s: Could not create model provider", __func__);
     }
+    larodError* tensor_error = NULL;
+    if (number_output_tensors != 1) panic("YOLOv8 OBB requires one output tensor");
+    const larodTensorDims* dims = larodGetTensorDims(model_provider->output_tensors[0], &tensor_error);
+    if (!dims || dims->len != 3 || dims->dims[0] != 1 || dims->dims[1] != 9 ||
+        dims->dims[2] != NUM_DETECTIONS) panic("Expected YOLOv8 OBB output [1,9,18900]");
+    if (larodGetTensorDataType(model_provider->input_tensors[0], &tensor_error) !=
+        LAROD_TENSOR_DATA_TYPE_UINT8) panic("The VDO pipeline requires a uint8 RGB model input");
     tensor_outputs = calloc(number_output_tensors, sizeof(model_tensor_output_t));
     if (!tensor_outputs) {
         panic("%s: Could not allocate tensor outputs", __func__);
     }
 
-    char** labels = NULL;          // This is the array of label strings. The label
-                                   // entries points into the large label_file_data buffer.
-    size_t num_labels;             // Number of entries in the labels array.
-    char* label_file_data = NULL;  // Buffer holding the complete collection of label strings.
-
     parse_labels(&labels, &label_file_data, args.labels_file, &num_labels);
+    if (num_labels != NUM_CLASSES) panic("Expected exactly four class labels");
+    for (size_t i = 0; i < num_labels; ++i) {
+        if (!g_utf8_validate(labels[i], -1, NULL) || strlen(labels[i]) > 256)
+            panic("Class labels must be UTF-8 and at most 256 bytes");
+    }
 
     syslog(LOG_INFO, "Start fetching video frames from VDO");
     if (!img_provider_start(image_provider)) {
@@ -359,17 +270,15 @@ int main(int argc, char** argv) {
 
     bbox = setup_bbox();
 
-    int size_per_detection = model_params->size_per_detection;
-    float qt_zero_point    = model_params->quantization_zero_point;
-    float qt_scale         = model_params->quantization_scale;
-
     while (running) {
+        if (!events_server_alive()) panic("FastCGI worker exited unexpectedly");
         struct timeval start_ts, end_ts;
         unsigned int preprocessing_ms = 0;
         unsigned int inference_ms     = 0;
         unsigned int total_elapsed_ms = 0;
 
         g_autoptr(VdoBuffer) vdo_buf = img_provider_get_frame(image_provider);
+        gint64 capture_time_us = g_get_real_time();
         if (!vdo_buf) {
             // This can only happen if it is global rotation then
             // the stream has to be restarted because rotation has been changed.
@@ -430,64 +339,18 @@ int main(int argc, char** argv) {
             }
         }
 
-        uint8_t* tensor_data = tensor_outputs[0].data;
-        // Parse the output
         gettimeofday(&start_ts, NULL);
-        filter_detections(tensor_data,
-                          conf_threshold,
-                          iou_threshold,
-                          model_params,
-                          invalid_detections);
+        int valid_detection_count = obb_decode(tensor_outputs[0].data, tensor_outputs[0].size,
+                                               &obb_config, conf_threshold, iou_threshold, detections);
+        if (valid_detection_count < 0) panic("Invalid OBB output buffer or decoder configuration");
         gettimeofday(&end_ts, NULL);
         syslog(LOG_INFO, "Ran parsing for %u ms", elapsed_ms(&start_ts, &end_ts));
 
         bbox_clear(bbox);
-
-        int valid_detection_count = 0;
-
-        for (int i = 0; i < model_params->num_detections; i++) {
-            if (invalid_detections[i] == 1) {
-                continue;
-            }
-
-            valid_detection_count++;
-
-            float highest_class_likelihood = 0.0;
-            int label_idx                  = 0;
-            float object_likelihood        = 0.0;
-
-            determine_class_and_object_likelihood(tensor_data,
-                                                  i,
-                                                  size_per_detection,
-                                                  qt_zero_point,
-                                                  qt_scale,
-                                                  &highest_class_likelihood,
-                                                  &label_idx,
-                                                  &object_likelihood);
-            // Log info about object
-            syslog(LOG_INFO,
-                   "Object %d: Label=%s, Object Likelihood=%.2f, Class Likelihood=%.2f, ",
-                   valid_detection_count,
-                   labels[label_idx],
-                   object_likelihood,
-                   highest_class_likelihood);
-
-            float x1, y1, x2, y2;
-            determine_bbox_coordinates(tensor_data,
-                                       i,
-                                       size_per_detection,
-                                       qt_zero_point,
-                                       qt_scale,
-                                       &x1,
-                                       &y1,
-                                       &x2,
-                                       &y2);
-            syslog(LOG_INFO, "Bounding Box: [%.2f, %.2f, %.2f, %.2f]", x1, y1, x2, y2);
-
-            // No need to compensate for rotation since bbox will handle this
-            bbox_coordinates_frame_normalized(bbox);
-            bbox_rectangle(bbox, x1, y1, x2, y2);
-        }
+        for (int i = 0; i < valid_detection_count; ++i) draw_obb(bbox, &detections[i]);
+        if (!events_publish(detections, valid_detection_count, labels,
+                            MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT, capture_time_us))
+            syslog(LOG_WARNING, "Detection result snapshot not updated; will retry next frame");
 
         if (!bbox_commit(bbox, 0u)) {
             panic("Failed to commit box drawer");
@@ -501,9 +364,11 @@ int main(int argc, char** argv) {
             g_clear_error(&vdo_error);
         }
     }
+    exit_status = EXIT_SUCCESS;
 
 end:
     // Cleanup
+    events_stop();
     free(model_params);
     if (image_provider) {
         destroy_img_provider(image_provider);
@@ -514,9 +379,9 @@ end:
     free(tensor_outputs);
     free(labels);
     free(label_file_data);
-    bbox_destroy(bbox);
+    if (bbox) bbox_destroy(bbox);
 
     syslog(LOG_INFO, "Exit %s", argv[0]);
 
-    return 0;
+    return exit_status;
 }

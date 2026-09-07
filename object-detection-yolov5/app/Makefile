@@ -1,9 +1,9 @@
-PROG1	= $(shell jq -r '.acapPackageConf.setup.appName' manifest.json)
-OBJS1	= $(PROG1).c argparse.c imgprovider.c model.c panic.c labelparse.c
+PROG1	= detection
+OBJS1	= object_detection_yolov5.c obb.c events.c argparse.c imgprovider.c model.c panic.c labelparse.c
 PROGS	= $(PROG1)
 DEBUG_DIR = debug
 
-PKGS = axparameter bbox gio-2.0 gio-unix-2.0 liblarod vdostream
+PKGS = axparameter bbox gio-2.0 gio-unix-2.0 liblarod vdostream fcgi
 
 CFLAGS += $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) pkg-config --cflags $(PKGS))
 LDLIBS += $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) pkg-config --libs $(PKGS))
@@ -25,6 +25,8 @@ CFLAGS += -Wall \
           -Werror
 
 all:	$(PROGS)
+
+.PHONY: all clean
 
 $(PROG1): $(OBJS1)
 	install -d $(DEBUG_DIR)

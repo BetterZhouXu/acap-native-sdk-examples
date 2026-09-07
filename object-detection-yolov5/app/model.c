@@ -31,7 +31,7 @@
 bool model_get_tensor_output_info(model_provider_t* provider,
                                   unsigned int tensor_output_index,
                                   model_tensor_output_t* tensor_output) {
-    if (tensor_output_index > (provider->num_outputs)) {
+    if (tensor_output_index >= provider->num_outputs) {
         panic("%s: Invalid output index %u", __func__, tensor_output_index);
     }
     *tensor_output = provider->model_output_tensors[tensor_output_index];

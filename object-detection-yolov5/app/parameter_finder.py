@@ -14,44 +14,68 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""
-Check your model quantization parameters and save them to file
-"""
-import tensorflow as tf
-import sys
+import argparse
+import math
+from pathlib import Path
 
-if len(sys.argv) > 1:
-    model_path = sys.argv[1]
-else:
-    print("Error: No model path provided as parameter. Please provide a path "
-          "as a command-line argument.")
-    exit(1)
+import numpy as np
 
-output_file = "model_params.h"
-interpreter = tf.lite.Interpreter(model_path)
-interpreter.allocate_tensors()
-output_details = interpreter.get_output_details()
-input_details  = interpreter.get_input_details()
 
-# The input format should be (batch, height, width, channel) but better verify
-# with a test in case width and height are flipped.
-model_input_height = input_details[0]["shape"][1]
-model_input_width  = input_details[0]["shape"][2]
+def model_header(inputs, outputs, coordinates):
+    """Validate metadata without running inference (DLPU custom ops are allowed)."""
+    if coordinates not in ("normalized", "pixels"):
+        raise ValueError("Coordinates must be normalized or pixels")
+    if len(inputs) != 1 or len(outputs) != 1:
+        raise ValueError("Expected exactly one input and one output")
+    model_input, model_output = inputs[0], outputs[0]
+    shape = tuple(int(n) for n in model_input["shape"])
+    if len(shape) != 4 or shape[0] != 1 or shape[3] != 3 or min(shape[1:3]) <= 0:
+        raise ValueError("Expected static RGB input [1, height, width, 3]")
+    if np.dtype(model_input["dtype"]) != np.dtype("uint8"):
+        raise ValueError("VDO preprocessing requires uint8 RGB input, not float32/int8")
+    if tuple(model_output["shape"]) != (1, 9, 18900):
+        raise ValueError("Expected channel-major OBB output [1, 9, 18900]")
+    types = {np.dtype("float32"): "OBB_FLOAT32", np.dtype("uint8"): "OBB_UINT8",
+             np.dtype("int8"): "OBB_INT8"}
+    dtype = np.dtype(model_output["dtype"])
+    if dtype not in types:
+        raise ValueError(f"Unsupported output datatype: {dtype}")
+    scale, zero_point = 1.0, 0
+    if dtype != np.dtype("float32"):
+        quant = model_output["quantization_parameters"]
+        if len(quant["scales"]) != 1 or len(quant["zero_points"]) != 1:
+            raise ValueError("Only per-tensor output quantization is supported")
+        scale = float(quant["scales"][0])
+        zero_point = int(quant["zero_points"][0])
+        if not math.isfinite(scale) or scale <= 0:
+            raise ValueError("Output quantization scale must be finite and positive")
+        limits = np.iinfo(dtype)
+        if not limits.min <= zero_point <= limits.max:
+            raise ValueError("Invalid output zero point")
+    return ("#ifndef MODEL_PARAMS_H\n#define MODEL_PARAMS_H\n\n"
+            f"#define MODEL_INPUT_HEIGHT {shape[1]}\n"
+            f"#define MODEL_INPUT_WIDTH {shape[2]}\n"
+            f"#define QUANTIZATION_SCALE {scale!r}f\n"
+            f"#define QUANTIZATION_ZERO_POINT {zero_point}\n"
+            f"#define MODEL_OUTPUT_DTYPE {types[dtype]}\n"
+            f"#define MODEL_COORDINATES_NORMALIZED {int(coordinates == 'normalized')}\n"
+            "#define NUM_CLASSES 4\n#define NUM_DETECTIONS 18900\n\n#endif\n")
 
-quantization_scale, quantization_zero_point = output_details[0]['quantization']
-num_classes    = output_details[0]['shape'][2] - 5 # Removing 5 values that are
-                                                   # x,y,w,h,obj_conf
-num_detections = output_details[0]['shape'][1]
 
-with open(output_file, "w") as f:
-    f.write(f"#ifndef MODEL_PARAMS_H\n")
-    f.write(f"#define MODEL_PARAMS_H\n\n")
-    f.write(f"#define MODEL_INPUT_HEIGHT {model_input_height}\n")
-    f.write(f"#define MODEL_INPUT_WIDTH {model_input_width}\n\n")
-    f.write(f"#define QUANTIZATION_SCALE {quantization_scale}f\n")
-    f.write(f"#define QUANTIZATION_ZERO_POINT {quantization_zero_point}\n\n")
-    f.write(f"#define NUM_CLASSES {num_classes}\n")
-    f.write(f"#define NUM_DETECTIONS {num_detections}\n\n")
-    f.write(f"#endif // MODEL_PARAMS_H\n")
+def main():
+    parser = argparse.ArgumentParser(description="Inspect a YOLOv8 OBB TFLite model")
+    parser.add_argument("model")
+    parser.add_argument("--coordinates", choices=("normalized", "pixels"), required=True)
+    parser.add_argument("--output", default="model_params.h")
+    args = parser.parse_args()
+    import tensorflow as tf  # Only the build-time CLI needs TensorFlow.
 
-print(f"Model parameters have been saved to {output_file}.")
+    interpreter = tf.lite.Interpreter(model_path=args.model)
+    header = model_header(interpreter.get_input_details(), interpreter.get_output_details(),
+                          args.coordinates)
+    Path(args.output).write_text(header, encoding="utf-8")
+    print(f"Model parameters have been saved to {args.output}.")
+
+
+if __name__ == "__main__":
+    main()
