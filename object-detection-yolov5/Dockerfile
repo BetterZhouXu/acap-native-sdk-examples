@@ -23,7 +23,7 @@ RUN python3 -m venv /opt/venv
 RUN . /opt/venv/bin/activate && pip install --no-cache-dir tensorflow
 
 #-------------------------------------------------------------------------------
-# Get YOLOv5 model and labels
+# Get YOLOv5 model
 #-------------------------------------------------------------------------------
 
 # Download pre-trained YOLOv5 model
@@ -41,16 +41,12 @@ RUN if [ "$CHIP" = cpu ] || [ "$CHIP" = artpec8 ]; then \
         exit 1; \
     fi
 
-# Download labels for model
-WORKDIR /opt/app/label
-RUN curl -L -o labels.txt \
-    https://github.com/google-coral/test_data/raw/master/coco_labels.txt
-
 #-------------------------------------------------------------------------------
 # Build ACAP application
 #-------------------------------------------------------------------------------
 
 WORKDIR /opt/app
+# This also copies the model-specific labels from app/label/labels.txt.
 COPY ./app .
 
 # Extract model parameters using the virtual environment

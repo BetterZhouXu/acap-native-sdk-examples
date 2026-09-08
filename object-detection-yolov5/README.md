@@ -33,6 +33,8 @@ object-detection-yolov5
 │   ├── detection_result.c/h
 │   ├── imgprovider.c
 │   ├── imgprovider.h
+│   ├── label
+│   │   └── labels.txt
 │   ├── labelparse.c
 │   ├── labelparse.h
 │   ├── LICENSE
@@ -54,6 +56,7 @@ object-detection-yolov5
 - **app/detection_fastcgi.c/h** - FastCGI endpoint that returns a pending detection result.
 - **app/detection_result.c/h** - Atomic local JSON result storage and consume-on-read handling.
 - **app/imgprovider.c/h** - Implementation of VDO parts.
+- **app/label/labels.txt** - Class labels corresponding to the model output order.
 - **app/labelparse.c/h** - Parse file of labels.
 - **app/LICENSE** - Text file which lists all open source licensed source code distributed with the
 application.
@@ -225,12 +228,12 @@ installed. In order to apply the changes, the ACAP application must be restarted
 
 ### Dockerfile parameters
 
-The model `.tflite` file and the labels `.txt` file are provided through the
-[Dockerfile](./Dockerfile). In this example, these files are downloaded using the `curl` command.
+The model `.tflite` file is downloaded by the [Dockerfile](./Dockerfile). Labels are copied from
+`app/label/labels.txt` into the image and included in the ACAP package.
 
-To use your own YOLOv5 model and labels file, you just have to configure the
-[Dockerfile](./Dockerfile) to download your files, or, if you have the files locally, use the `COPY`
-command instead.
+To use your own YOLOv5 model, configure the [Dockerfile](./Dockerfile) to download it or copy a local
+model into `model/model.tflite`. Replace `app/label/labels.txt` with labels matching the model's class
+indexes before building.
 
 ### Model-specific parameters
 
