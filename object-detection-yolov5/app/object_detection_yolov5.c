@@ -31,6 +31,8 @@
  */
 
 #include "argparse.h"
+#include "detection_fastcgi.h"
+#include "detection_result.h"
 #include "imgprovider.h"
 #include "labelparse.h"
 #include "model.h"
@@ -41,14 +43,18 @@
 #include "vdo-types.h"
 #include <axsdk/axparameter.h>
 #include <bbox.h>
+#include <jansson.h>
 
+#include <errno.h>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/time.h>
 #include <syslog.h>
 
-#define APP_NAME "object_detection_yolov5"
+#define APP_NAME "detection"
 
 volatile sig_atomic_t running = 1;
 
@@ -251,6 +257,14 @@ int main(int argc, char** argv) {
     // Stop main loop at signal
     signal(SIGTERM, shutdown);
     signal(SIGINT, shutdown);
+    signal(SIGPIPE, SIG_IGN);
+
+    if (!detection_result_init()) {
+        panic("Failed to initialize detection result storage: %s", strerror(errno));
+    }
+    if (!detection_fastcgi_start()) {
+        panic("Failed to start detection result endpoint");
+    }
 
     args_t args;
     parse_args(argc, argv, &args);
@@ -444,13 +458,15 @@ int main(int argc, char** argv) {
         bbox_clear(bbox);
 
         int valid_detection_count = 0;
+        json_t* detections         = json_array();
+        if (!detections) {
+            panic("Failed to create detection result JSON array");
+        }
 
         for (int i = 0; i < model_params->num_detections; i++) {
             if (invalid_detections[i] == 1) {
                 continue;
             }
-
-            valid_detection_count++;
 
             float highest_class_likelihood = 0.0;
             int label_idx                  = 0;
@@ -464,6 +480,11 @@ int main(int argc, char** argv) {
                                                   &highest_class_likelihood,
                                                   &label_idx,
                                                   &object_likelihood);
+            if ((size_t)label_idx >= num_labels) {
+                syslog(LOG_ERR, "Model returned invalid label index %d", label_idx);
+                continue;
+            }
+            valid_detection_count++;
             // Log info about object
             syslog(LOG_INFO,
                    "Object %d: Label=%s, Object Likelihood=%.2f, Class Likelihood=%.2f, ",
@@ -487,6 +508,62 @@ int main(int argc, char** argv) {
             // No need to compensate for rotation since bbox will handle this
             bbox_coordinates_frame_normalized(bbox);
             bbox_rectangle(bbox, x1, y1, x2, y2);
+
+            json_t* detection = json_pack("{s:s,s:f,s:f,s:{s:f,s:f,s:f,s:f}}",
+                                          "label",
+                                          labels[label_idx],
+                                          "objectLikelihood",
+                                          object_likelihood,
+                                          "classLikelihood",
+                                          highest_class_likelihood,
+                                          "boundingBox",
+                                          "x1",
+                                          x1,
+                                          "y1",
+                                          y1,
+                                          "x2",
+                                          x2,
+                                          "y2",
+                                          y2);
+            if (!detection) {
+                json_decref(detections);
+                panic("Failed to create detection result JSON");
+            }
+            if (json_array_append(detections, detection) != 0) {
+                json_decref(detection);
+                json_decref(detections);
+                panic("Failed to create detection result JSON");
+            }
+            json_decref(detection);
+        }
+
+        if (json_array_size(detections) > 0) {
+            struct timeval result_time;
+            gettimeofday(&result_time, NULL);
+            json_int_t timestamp_ms = (json_int_t)result_time.tv_sec * 1000 +
+                                      (json_int_t)result_time.tv_usec / 1000;
+            json_t* result = json_pack("{s:I,s:O}",
+                                       "timestampUnixMs",
+                                       timestamp_ms,
+                                       "detections",
+                                       detections);
+            json_decref(detections);
+            if (!result) {
+                panic("Failed to create detection result JSON");
+            }
+
+            char* result_json = json_dumps(result, JSON_COMPACT);
+            if (!result_json) {
+                json_decref(result);
+                panic("Failed to serialize detection result JSON");
+            }
+            if (!detection_result_publish(result_json, strlen(result_json))) {
+                syslog(LOG_ERR, "Failed to save detection result: %s", strerror(errno));
+            }
+            free(result_json);
+            json_decref(result);
+        } else {
+            json_decref(detections);
         }
 
         if (!bbox_commit(bbox, 0u)) {

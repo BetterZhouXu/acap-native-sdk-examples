@@ -13,6 +13,7 @@ This example uses the following APIs:
 - [Video capture API (VDO)](https://developer.axis.com/acap/api/native-sdk-api/#video-capture-api-vdo)
 - [Bounding Box API](https://developer.axis.com/acap/api/native-sdk-api/#bounding-box-api)
 - [Parameter API](https://developer.axis.com/acap/api/native-sdk-api/#parameter-api)
+- [FastCGI](https://developer.axis.com/acap/develop/web-server/)
 
 Below is an example showing how the bounding boxes are drawn around the detected objects on the
 stream.
@@ -28,6 +29,8 @@ object-detection-yolov5
 ├── app
 │   ├── argparse.c
 │   ├── argparse.h
+│   ├── detection_fastcgi.c/h
+│   ├── detection_result.c/h
 │   ├── imgprovider.c
 │   ├── imgprovider.h
 │   ├── labelparse.c
@@ -48,6 +51,8 @@ object-detection-yolov5
 ```
 
 - **app/argparse.c/h** - Program argument parser.
+- **app/detection_fastcgi.c/h** - FastCGI endpoint that returns a pending detection result.
+- **app/detection_result.c/h** - Atomic local JSON result storage and consume-on-read handling.
 - **app/imgprovider.c/h** - Implementation of VDO parts.
 - **app/labelparse.c/h** - Parse file of labels.
 - **app/LICENSE** - Text file which lists all open source licensed source code distributed with the
@@ -87,6 +92,7 @@ example specified.
   - [Model-specific parameters](#model-specific-parameters)
 - [Build the application](#build-the-application)
 - [Install and start the application](#install-and-start-the-application)
+- [Query detection results](#query-detection-results)
 - [Expected output](#expected-output)
   - [Application log](#application-log)
 - [License](#license)
@@ -110,7 +116,8 @@ that has the same aspect ratio as the native aspect ratio.
     3. Run inference with the Larod model inference job.
     4. Measure the total inference time (preprocessing and inference time) and adjust the framerate of the vdo stream if needed.
     5. Perform YOLOv5-specific parsing of the output.
-    6. Draw bounding boxes and log details about the detected objects.
+    6. Draw bounding boxes, log details, and atomically save JSON when objects are detected.
+    7. Serve a pending result through FastCGI and remove it after a successful response.
 
 ## Train YOLOv5
 
@@ -298,6 +305,41 @@ http://<AXIS_DEVICE_IP>/index.html#apps
 5. Click **Install**
 6. Run the application by enabling the **Start** switch
 
+## Query detection results
+
+The next unconsumed frame containing at least one detection is stored at
+`/usr/local/packages/detection/localdata/detection-result.json`. The application does
+not replace a pending result, which limits writes when no client is querying. A viewer-authenticated
+`GET` request atomically claims that file, returns it, and removes the claimed file after the response
+has been flushed successfully:
+
+```sh
+curl --anyauth --user '<USER>:<PASSWORD>' \
+  'http://<AXIS_DEVICE_IP>/local/detection/events.cgi'
+```
+
+A successful response has HTTP status `200` and this compact JSON structure (formatted here for
+readability):
+
+```json
+{
+  "timestampUnixMs": 1788883200123,
+  "detections": [
+    {
+      "label": "car",
+      "objectLikelihood": 0.82,
+      "classLikelihood": 0.94,
+      "boundingBox": {"x1": 0.36, "y1": 0.44, "x2": 0.43, "y2": 0.49}
+    }
+  ]
+}
+```
+
+Bounding-box coordinates are normalized to the frame. If no result is pending, the endpoint returns
+HTTP `204 No Content`. Only `GET` is accepted; other methods return HTTP `405` and do not consume a
+result. If response delivery fails, the claimed result is retained for a later retry. A detection
+that arrives while a result is being served is kept as the next pending result.
+
 ## Expected output
 
 This example uses the
@@ -317,7 +359,7 @@ bounding boxes directly on the device stream. View the stream by following the i
 
 The application log can be found by either:
 
-- Browsing to `http://<AXIS_DEVICE_IP>/axis-cgi/admin/systemlog.cgi?appname=object_detection_yolov5`.
+- Browsing to `http://<AXIS_DEVICE_IP>/axis-cgi/admin/systemlog.cgi?appname=detection`.
 - Browsing to the application page and click the `App log`.
 
 Depending on selected device, different output is received.
@@ -333,31 +375,31 @@ In the system log the larod device is sometimes mentioned as a string, they are 
 Initially, the log will show this:
 
 ```sh
------ Contents of SYSTEM_LOG for 'object_detection_yolov5' -----
+----- Contents of SYSTEM_LOG for 'detection' -----
 
-[ INFO    ] object_detection_yolov5[975576]: Model input size w/h: 640 x 640
-[ INFO    ] object_detection_yolov5[975576]: Quantization scale: 0.004191
-[ INFO    ] object_detection_yolov5[975576]: Quantization zero point: 0.000000
-[ INFO    ] object_detection_yolov5[975576]: Number of classes: 80
-[ INFO    ] object_detection_yolov5[975576]: Number of detections: 25200
-[ INFO    ] object_detection_yolov5[975576]: Axparameter ConfThresholdPercent: 25
-[ INFO    ] object_detection_yolov5[975576]: Axparameter IouThresholdPercent: 5
-[ INFO    ] object_detection_yolov5[975576]: choose_stream_resolution: We select stream w/h=1280 x 720 based on VDO channel info.
-[ INFO    ] object_detection_yolov5[975576]: Creating VDO image provider and creating stream 1280 x 720
-[ INFO    ] object_detection_yolov5[975576]: Dump of vdo stream settings map =====
-[ INFO    ] object_detection_yolov5[975576]: 'buffer.count'-----: <uint32 2>
-[ INFO    ] object_detection_yolov5[975576]: 'dynamic.framerate': <true>
-[ INFO    ] object_detection_yolov5[975576]: 'format'-----------: <uint32 3>
-[ INFO    ] object_detection_yolov5[975576]: 'framerate'--------: <30.0>
-[ INFO    ] object_detection_yolov5[975576]: 'height'-----------: <uint32 720>
-[ INFO    ] object_detection_yolov5[975576]: 'input'------------: <uint32 1>
-[ INFO    ] object_detection_yolov5[975576]: 'socket.blocking'--: <false>
-[ INFO    ] object_detection_yolov5[975576]: 'width'------------: <uint32 1280>
-[ INFO    ] object_detection_yolov5[975576]: Setting up larod connection with device axis-a8-dlpu-tflite
-[ INFO    ] object_detection_yolov5[975576]: Loading the model... This might take up to 5 minutes depending on your device model.
-[ INFO    ] object_detection_yolov5[975576]: Model loaded successfully
-[ INFO    ] object_detection_yolov5[975576]: Created mmaped model output 0 with size 2142000
-[ INFO    ] object_detection_yolov5[975576]: Start fetching video frames from VDO
+[ INFO    ] detection[975576]: Model input size w/h: 640 x 640
+[ INFO    ] detection[975576]: Quantization scale: 0.004191
+[ INFO    ] detection[975576]: Quantization zero point: 0.000000
+[ INFO    ] detection[975576]: Number of classes: 80
+[ INFO    ] detection[975576]: Number of detections: 25200
+[ INFO    ] detection[975576]: Axparameter ConfThresholdPercent: 25
+[ INFO    ] detection[975576]: Axparameter IouThresholdPercent: 5
+[ INFO    ] detection[975576]: choose_stream_resolution: We select stream w/h=1280 x 720 based on VDO channel info.
+[ INFO    ] detection[975576]: Creating VDO image provider and creating stream 1280 x 720
+[ INFO    ] detection[975576]: Dump of vdo stream settings map =====
+[ INFO    ] detection[975576]: 'buffer.count'-----: <uint32 2>
+[ INFO    ] detection[975576]: 'dynamic.framerate': <true>
+[ INFO    ] detection[975576]: 'format'-----------: <uint32 3>
+[ INFO    ] detection[975576]: 'framerate'--------: <30.0>
+[ INFO    ] detection[975576]: 'height'-----------: <uint32 720>
+[ INFO    ] detection[975576]: 'input'------------: <uint32 1>
+[ INFO    ] detection[975576]: 'socket.blocking'--: <false>
+[ INFO    ] detection[975576]: 'width'------------: <uint32 1280>
+[ INFO    ] detection[975576]: Setting up larod connection with device axis-a8-dlpu-tflite
+[ INFO    ] detection[975576]: Loading the model... This might take up to 5 minutes depending on your device model.
+[ INFO    ] detection[975576]: Model loaded successfully
+[ INFO    ] detection[975576]: Created mmaped model output 0 with size 2142000
+[ INFO    ] detection[975576]: Start fetching video frames from VDO
 ```
 
 While the ACAP application is running, information about each frame will be logged. The log shows run
@@ -365,15 +407,15 @@ times for pre-processing, inference, and parsing. Following that, each detected 
 logged. Below is the output log of a frame where one truck and two cars have been detected:
 
 ```sh
-[ INFO    ] object_detection_yolov5[975576]: Ran pre-processing for 20 ms
-[ INFO    ] object_detection_yolov5[975576]: Ran inference for 60 ms
-[ INFO    ] object_detection_yolov5[975576]: Ran parsing for 1 ms
-[ INFO    ] object_detection_yolov5[975576]: Object 1: Label=truck, Object Likelihood=0.57, Class Likelihood=0.75,
-[ INFO    ] object_detection_yolov5[975576]: Bounding Box: [0.99, 0.54, 0.91, 0.46]
-[ INFO    ] object_detection_yolov5[975576]: Object 2: Label=car, Object Likelihood=0.75, Class Likelihood=0.91,
-[ INFO    ] object_detection_yolov5[975576]: Bounding Box: [0.68, 0.48, 0.61, 0.43]
-[ INFO    ] object_detection_yolov5[975576]: Object 3: Label=car, Object Likelihood=0.83, Class Likelihood=0.94,
-[ INFO    ] object_detection_yolov5[975576]: Bounding Box: [0.43, 0.49, 0.36, 0.44]
+[ INFO    ] detection[975576]: Ran pre-processing for 20 ms
+[ INFO    ] detection[975576]: Ran inference for 60 ms
+[ INFO    ] detection[975576]: Ran parsing for 1 ms
+[ INFO    ] detection[975576]: Object 1: Label=truck, Object Likelihood=0.57, Class Likelihood=0.75,
+[ INFO    ] detection[975576]: Bounding Box: [0.99, 0.54, 0.91, 0.46]
+[ INFO    ] detection[975576]: Object 2: Label=car, Object Likelihood=0.75, Class Likelihood=0.91,
+[ INFO    ] detection[975576]: Bounding Box: [0.68, 0.48, 0.61, 0.43]
+[ INFO    ] detection[975576]: Object 3: Label=car, Object Likelihood=0.83, Class Likelihood=0.94,
+[ INFO    ] detection[975576]: Bounding Box: [0.43, 0.49, 0.36, 0.44]
 ```
 
 ## License

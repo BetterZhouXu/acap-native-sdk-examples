@@ -16,15 +16,22 @@
     "acapPackageConf": {
         "setup": {
             "friendlyName": "object_detection_yolov5_artpec9",
-            "appName": "object_detection_yolov5",
+            "appName": "detection",
             "vendor": "Axis Communications",
             "embeddedSdkVersion": "3.0",
-            "runOptions": "/usr/local/packages/object_detection_yolov5/model/model.tflite /usr/local/packages/object_detection_yolov5/label/labels.txt  -c a9-dlpu-tflite",
+            "runOptions": "/usr/local/packages/detection/model/model.tflite /usr/local/packages/detection/label/labels.txt  -c a9-dlpu-tflite",
             "vendorUrl": "https://www.axis.com",
             "runMode": "never",
             "version": "1.0.0"
         },
         "configuration": {
+            "httpConfig": [
+                {
+                    "access": "viewer",
+                    "name": "events.cgi",
+                    "type": "fastCgi"
+                }
+            ],
             "paramConfig": [
                 {
                     "name": "ConfThresholdPercent",
