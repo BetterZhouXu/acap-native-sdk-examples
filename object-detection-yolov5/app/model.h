@@ -45,12 +45,19 @@ typedef struct model_provider {
     larodMap* crop_map;
 
     size_t image_buffer_size;
+    size_t preprocessed_buffer_size;
+    size_t model_input_buffer_size;
 
     int image_input_fd;
+    int preprocessed_output_fd;
+    int model_input_fd;
     void* image_input_addr;
+    void* preprocessed_output_addr;
+    void* model_input_addr;
     int larod_model_fd;
 
     bool use_preprocessing;
+    bool normalize_to_float;
 
     model_tensor_output_t* model_output_tensors;
 } model_provider_t;

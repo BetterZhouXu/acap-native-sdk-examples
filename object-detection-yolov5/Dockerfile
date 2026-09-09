@@ -23,39 +23,26 @@ RUN python3 -m venv /opt/venv
 RUN . /opt/venv/bin/activate && pip install --no-cache-dir tensorflow
 
 #-------------------------------------------------------------------------------
-# Get YOLOv5 model and labels
-#-------------------------------------------------------------------------------
-
-# Download pre-trained YOLOv5 model
-WORKDIR /opt/app/model
-ARG CHIP=artpec8
-ARG MODEL_BUCKET=https://acap-ml-models.s3.amazonaws.com/yolov5
-RUN if [ "$CHIP" = cpu ] || [ "$CHIP" = artpec8 ]; then \
-        curl -L -o model.tflite \
-        $MODEL_BUCKET/yolov5n_artpec8_coco_640.tflite ; \
-    elif [ "$CHIP" = artpec9 ]; then \
-        curl -L -o model.tflite \
-        $MODEL_BUCKET/yolov5n_artpec9_coco_640.tflite ; \
-    else \
-        printf "Error: '%s' is not a valid value for the CHIP variable\n", "$CHIP"; \
-        exit 1; \
-    fi
-
-# Download labels for model
-WORKDIR /opt/app/label
-RUN curl -L -o labels.txt \
-    https://github.com/google-coral/test_data/raw/master/coco_labels.txt
-
-#-------------------------------------------------------------------------------
 # Build ACAP application
 #-------------------------------------------------------------------------------
 
 WORKDIR /opt/app
 COPY ./app .
 
-# Extract model parameters using the virtual environment
+# Explicit asset copies make model or label changes visible as separate Docker layers.
+COPY ./app/model/model.tflite ./model/model.tflite
+COPY ./app/label/labels.txt ./label/labels.txt
+
+ARG CHIP=artpec8
+
+# Print hashes in the build log so the packaged inputs can be verified.
+RUN test -s model/model.tflite && test -s label/labels.txt && \
+    sha256sum model/model.tflite label/labels.txt
+
+# Extract and validate YOLOv8 OBB model parameters.
 # hadolint ignore=SC1091
-RUN . /opt/venv/bin/activate && python parameter_finder.py 'model/model.tflite'
+RUN . /opt/venv/bin/activate && \
+    python parameter_finder.py 'model/model.tflite' 'label/labels.txt'
 
 RUN cp /opt/app/manifest.json.${CHIP} /opt/app/manifest.json && \
     . /opt/axis/acapsdk/environment-setup* && acap-build . \

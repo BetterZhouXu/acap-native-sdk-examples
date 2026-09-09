@@ -15,16 +15,23 @@
     },
     "acapPackageConf": {
         "setup": {
-            "friendlyName": "object_detection_yolov5_artpec8",
-            "appName": "object_detection_yolov5",
+            "friendlyName": "detection_yolov8_obb_artpec8",
+            "appName": "detection",
             "vendor": "Axis Communications",
             "embeddedSdkVersion": "3.0",
-            "runOptions": "/usr/local/packages/object_detection_yolov5/model/model.tflite /usr/local/packages/object_detection_yolov5/label/labels.txt  -c axis-a8-dlpu-tflite",
+            "runOptions": "/usr/local/packages/detection/model/model.tflite /usr/local/packages/detection/label/labels.txt -c axis-a8-dlpu-tflite",
             "vendorUrl": "https://www.axis.com",
             "runMode": "never",
             "version": "1.0.0"
         },
         "configuration": {
+            "httpConfig": [
+                {
+                    "access": "viewer",
+                    "name": "events.cgi",
+                    "type": "fastCgi"
+                }
+            ],
             "paramConfig": [
                 {
                     "name": "ConfThresholdPercent",
@@ -33,7 +40,7 @@
                 },
                 {
                     "name": "IouThresholdPercent",
-                    "default": "5",
+                    "default": "45",
                     "type": "int:maxlen=3;min=0;max=100"
                 }
             ]

@@ -17,9 +17,8 @@
 /**
  * - object_detection_bbox_yolov5 -
  *
- * This application loads a larod YOLOv5 model which takes an image as input. The output is
- * YOLOv5-specifically parsed to retrieve values corresponding to the class, score and location of
- * detected objects in the image.
+ * This application loads a Larod YOLOv8 OBB model. Its float32 channel-first output is decoded into
+ * classes, confidence scores, angles, and oriented bounding-box corners.
  *
  * The application expects two arguments on the command line in the
  * following order: MODELFILE LABELSFILE.
@@ -31,24 +30,31 @@
  */
 
 #include "argparse.h"
+#include "detection_fastcgi.h"
+#include "detection_result.h"
 #include "imgprovider.h"
 #include "labelparse.h"
 #include "model.h"
 #include "model_params.h"  //Generated at build time
 #include "panic.h"
+#include "yolov8_obb.h"
 #include "vdo-error.h"
 #include "vdo-frame.h"
 #include "vdo-types.h"
 #include <axsdk/axparameter.h>
 #include <bbox.h>
+#include <jansson.h>
 
+#include <errno.h>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/time.h>
 #include <syslog.h>
 
-#define APP_NAME "object_detection_yolov5"
+#define APP_NAME "detection"
 
 volatile sig_atomic_t running = 1;
 
@@ -56,16 +62,6 @@ static void shutdown(int status) {
     (void)status;
     running = 0;
 }
-
-typedef struct model_params {
-    int input_width;
-    int input_height;
-    float quantization_scale;
-    float quantization_zero_point;
-    int num_classes;
-    int num_detections;
-    int size_per_detection;
-} model_params_t;
 
 static int ax_parameter_get_int(AXParameter* handle, const char* name) {
     gchar* str_value = NULL;
@@ -111,135 +107,6 @@ static unsigned int elapsed_ms(struct timeval* start_ts, struct timeval* end_ts)
                           ((end_ts->tv_usec - start_ts->tv_usec) / 1000));
 }
 
-static float intersection_over_union(float x1,
-                                     float y1,
-                                     float w1,
-                                     float h1,
-                                     float x2,
-                                     float y2,
-                                     float w2,
-                                     float h2) {
-    float xx1 = fmax(x1 - (w1 / 2), x2 - (w2 / 2));
-    float yy1 = fmax(y1 - (h1 / 2), y2 - (h2 / 2));
-    float xx2 = fmin(x1 + (w1 / 2), x2 + (w2 / 2));
-    float yy2 = fmin(y1 + (h1 / 2), y2 + (h2 / 2));
-
-    float inter_area = fmax(0, xx2 - xx1) * fmax(0, yy2 - yy1);
-    float union_area = w1 * h1 + w2 * h2 - inter_area;
-
-    return inter_area / union_area;
-}
-
-static void non_maximum_suppression(uint8_t* tensor,
-                                    float iou_threshold,
-                                    model_params_t* model_params,
-                                    int* invalid_detections) {
-    int size_per_detection = model_params->size_per_detection;
-    int num_detections     = model_params->num_detections;
-    float qt_zero_point    = model_params->quantization_zero_point;
-    float qt_scale         = model_params->quantization_scale;
-
-    for (int i = 0; i < num_detections; i++) {
-        if (invalid_detections[i])  // Skip comparison if detection is already invalid
-            continue;
-
-        float x1                 = (tensor[size_per_detection * i + 0] - qt_zero_point) * qt_scale;
-        float y1                 = (tensor[size_per_detection * i + 1] - qt_zero_point) * qt_scale;
-        float w1                 = (tensor[size_per_detection * i + 2] - qt_zero_point) * qt_scale;
-        float h1                 = (tensor[size_per_detection * i + 3] - qt_zero_point) * qt_scale;
-        float object1_likelihood = (tensor[size_per_detection * i + 4] - qt_zero_point) * qt_scale;
-
-        for (int j = i + 1; j < num_detections; j++) {
-            if (invalid_detections[j])  // Skip comparison if detection is already invalid
-                continue;
-
-            float x2 = (tensor[size_per_detection * j + 0] - qt_zero_point) * qt_scale;
-            float y2 = (tensor[size_per_detection * j + 1] - qt_zero_point) * qt_scale;
-            float w2 = (tensor[size_per_detection * j + 2] - qt_zero_point) * qt_scale;
-            float h2 = (tensor[size_per_detection * j + 3] - qt_zero_point) * qt_scale;
-            float object2_likelihood =
-                (tensor[size_per_detection * j + 4] - qt_zero_point) * qt_scale;
-
-            if (intersection_over_union(x1, y1, w1, h1, x2, y2, w2, h2) > iou_threshold) {
-                // invalidates the detection with lowest object likelihood score
-                if (object1_likelihood > object2_likelihood) {
-                    invalid_detections[j] = 1;
-                } else {
-                    invalid_detections[i] = 1;
-                    break;
-                }
-            }
-        }
-    }
-}
-
-static void filter_detections(uint8_t* tensor,
-                              float conf_threshold,
-                              float iou_threshold,
-                              model_params_t* model_params,
-                              int* invalid_detections) {
-    // Filter boxes by confidence
-    for (int i = 0; i < model_params->num_detections; i++) {
-        float object_likelihood = (tensor[model_params->size_per_detection * i + 4] -
-                                   model_params->quantization_zero_point) *
-                                  model_params->quantization_scale;
-
-        if (object_likelihood < conf_threshold) {
-            invalid_detections[i] = 1;
-        } else {
-            invalid_detections[i] = 0;
-        }
-    }
-
-    non_maximum_suppression(tensor, iou_threshold, model_params, invalid_detections);
-}
-
-static void determine_class_and_object_likelihood(uint8_t* tensor,
-                                                  int detection_idx,
-                                                  int size_per_detection,
-                                                  float qt_zero_point,
-                                                  float qt_scale,
-                                                  float* highest_class_likelihood,
-                                                  int* label_idx,
-                                                  float* object_likelihood) {
-    // Find what class this object is
-    for (int j = 5; j < size_per_detection; j++) {
-        float class_likelihood =
-            (tensor[size_per_detection * detection_idx + j] - qt_zero_point) * qt_scale;
-        if (class_likelihood > *highest_class_likelihood) {
-            *highest_class_likelihood = class_likelihood;
-            *label_idx                = j - 5;
-        }
-    }
-
-    *object_likelihood =
-        (tensor[size_per_detection * detection_idx + 4] - qt_zero_point) * qt_scale;
-}
-
-static void
-find_corners(float x, float y, float w, float h, float* x1, float* y1, float* x2, float* y2) {
-    *x1 = fmax(0.0, x - (w / 2));
-    *y1 = fmax(0.0, y - (h / 2));
-    *x2 = fmin(1.0, x + (w / 2));
-    *y2 = fmin(1.0, y + (h / 2));
-}
-
-static void determine_bbox_coordinates(uint8_t* tensor,
-                                       int detection_idx,
-                                       int size_per_detection,
-                                       float qt_zero_point,
-                                       float qt_scale,
-                                       float* x1,
-                                       float* y1,
-                                       float* x2,
-                                       float* y2) {
-    // Get coordinates for the object
-    float x = (tensor[size_per_detection * detection_idx + 0] - qt_zero_point) * qt_scale;
-    float y = (tensor[size_per_detection * detection_idx + 1] - qt_zero_point) * qt_scale;
-    float w = (tensor[size_per_detection * detection_idx + 2] - qt_zero_point) * qt_scale;
-    float h = (tensor[size_per_detection * detection_idx + 3] - qt_zero_point) * qt_scale;
-    find_corners(x, y, w, h, x1, y1, x2, y2);
-}
 
 int main(int argc, char** argv) {
     g_autoptr(GError) vdo_error           = NULL;
@@ -247,40 +114,51 @@ int main(int argc, char** argv) {
     model_provider_t* model_provider      = NULL;
     model_tensor_output_t* tensor_outputs = NULL;
     bbox_t* bbox                          = NULL;
+    char** labels                         = NULL;
+    char* label_file_data                 = NULL;
+    size_t num_labels                     = 0;
 
     // Stop main loop at signal
     signal(SIGTERM, shutdown);
     signal(SIGINT, shutdown);
+    signal(SIGPIPE, SIG_IGN);
+
+    if (!detection_result_init()) {
+        panic("Failed to initialize detection result storage: %s", strerror(errno));
+    }
+    if (!detection_fastcgi_start()) {
+        panic("Failed to start detection result endpoint");
+    }
 
     args_t args;
     parse_args(argc, argv, &args);
 
-    model_params_t* model_params = (model_params_t*)malloc(sizeof(model_params_t));
+    yolov8_obb_params_t* model_params = malloc(sizeof(yolov8_obb_params_t));
     if (model_params == NULL) {
-        panic("%s: Unable to allocate model_params_t: %s", __func__, strerror(errno));
+        panic("%s: Unable to allocate model parameters: %s", __func__, strerror(errno));
     }
 
     // Comes from model_params.h
-    model_params->input_width             = MODEL_INPUT_WIDTH;
-    model_params->input_height            = MODEL_INPUT_HEIGHT;
-    model_params->quantization_scale      = QUANTIZATION_SCALE;
-    model_params->quantization_zero_point = QUANTIZATION_ZERO_POINT;
-    model_params->num_classes             = NUM_CLASSES;
-    model_params->num_detections          = NUM_DETECTIONS;
-    model_params->size_per_detection =
-        5 + NUM_CLASSES;  // Each detection consists of [x, y, w, h, object_likelihood,
-                          // class1_likelihood, class2_likelihood, class3_likelihood, ... ]
+    model_params->input_width    = MODEL_INPUT_WIDTH;
+    model_params->input_height   = MODEL_INPUT_HEIGHT;
+    model_params->num_classes    = NUM_CLASSES;
+    model_params->num_detections = NUM_DETECTIONS;
+    model_params->num_features   = NUM_FEATURES;
 
     syslog(LOG_INFO,
            "Model input size w/h: %d x %d",
            model_params->input_width,
            model_params->input_height);
-    syslog(LOG_INFO, "Quantization scale: %f", model_params->quantization_scale);
-    syslog(LOG_INFO, "Quantization zero point: %f", model_params->quantization_zero_point);
+    syslog(LOG_INFO, "Model input/output type: float32");
     syslog(LOG_INFO, "Number of classes: %d", model_params->num_classes);
     syslog(LOG_INFO, "Number of detections: %d", model_params->num_detections);
+    syslog(LOG_INFO, "Features per detection: %d", model_params->num_features);
 
-    int invalid_detections[model_params->num_detections];
+    obb_detection_t* parsed_detections =
+        calloc(YOLOV8_OBB_MAX_RESULTS, sizeof(obb_detection_t));
+    if (!parsed_detections) {
+        panic("%s: Could not allocate parsed detections", __func__);
+    }
 
     // Create a new axparameter instance
     GError* axparameter_error       = NULL;
@@ -332,7 +210,7 @@ int main(int argc, char** argv) {
                                            image_provider->height,
                                            image_provider->pitch,
                                            image_provider->format,
-                                           VDO_FORMAT_RGB,
+                                           VDO_FORMAT_PLANAR_RGB,
                                            args.model_file,
                                            args.device_name,
                                            false,
@@ -340,17 +218,21 @@ int main(int argc, char** argv) {
     if (!model_provider) {
         panic("%s: Could not create model provider", __func__);
     }
+    if (number_output_tensors != 1) {
+        panic("YOLOv8 OBB model must have exactly one output tensor, got %zu",
+              number_output_tensors);
+    }
     tensor_outputs = calloc(number_output_tensors, sizeof(model_tensor_output_t));
     if (!tensor_outputs) {
         panic("%s: Could not allocate tensor outputs", __func__);
     }
 
-    char** labels = NULL;          // This is the array of label strings. The label
-                                   // entries points into the large label_file_data buffer.
-    size_t num_labels;             // Number of entries in the labels array.
-    char* label_file_data = NULL;  // Buffer holding the complete collection of label strings.
-
     parse_labels(&labels, &label_file_data, args.labels_file, &num_labels);
+    if (num_labels != (size_t)model_params->num_classes) {
+        panic("Model has %d classes but labels file has %zu labels",
+              model_params->num_classes,
+              num_labels);
+    }
 
     syslog(LOG_INFO, "Start fetching video frames from VDO");
     if (!img_provider_start(image_provider)) {
@@ -359,9 +241,6 @@ int main(int argc, char** argv) {
 
     bbox = setup_bbox();
 
-    int size_per_detection = model_params->size_per_detection;
-    float qt_zero_point    = model_params->quantization_zero_point;
-    float qt_scale         = model_params->quantization_scale;
 
     while (running) {
         struct timeval start_ts, end_ts;
@@ -424,69 +303,130 @@ int main(int argc, char** argv) {
         // Check if the framerate from vdo should be changed
         img_provider_update_framerate(image_provider, total_elapsed_ms);
 
-        for (size_t i = 0; i < number_output_tensors; i++) {
-            if (!model_get_tensor_output_info(model_provider, i, &tensor_outputs[i])) {
-                panic("Failed to get output tensor info for %zu", i);
-            }
+        if (!model_get_tensor_output_info(model_provider, 0, &tensor_outputs[0])) {
+            panic("Failed to get output tensor info");
         }
 
-        uint8_t* tensor_data = tensor_outputs[0].data;
-        // Parse the output
+        size_t expected_output_size = (size_t)model_params->num_features *
+                                      (size_t)model_params->num_detections * sizeof(float);
+        if (tensor_outputs[0].datatype != LAROD_TENSOR_DATA_TYPE_FLOAT32 ||
+            tensor_outputs[0].size != expected_output_size) {
+            panic("Unexpected output tensor type or size (%zu, expected %zu)",
+                  tensor_outputs[0].size,
+                  expected_output_size);
+        }
+
+        size_t valid_detection_count = 0;
         gettimeofday(&start_ts, NULL);
-        filter_detections(tensor_data,
-                          conf_threshold,
-                          iou_threshold,
-                          model_params,
-                          invalid_detections);
+        if (!yolov8_obb_decode(tensor_outputs[0].data,
+                               model_params,
+                               conf_threshold,
+                               iou_threshold,
+                               parsed_detections,
+                               YOLOV8_OBB_MAX_RESULTS,
+                               &valid_detection_count)) {
+            panic("Failed to decode YOLOv8 OBB output");
+        }
         gettimeofday(&end_ts, NULL);
         syslog(LOG_INFO, "Ran parsing for %u ms", elapsed_ms(&start_ts, &end_ts));
 
         bbox_clear(bbox);
+        json_t* detections_json = json_array();
+        if (!detections_json) {
+            panic("Failed to create detection JSON array");
+        }
 
-        int valid_detection_count = 0;
-
-        for (int i = 0; i < model_params->num_detections; i++) {
-            if (invalid_detections[i] == 1) {
-                continue;
-            }
-
-            valid_detection_count++;
-
-            float highest_class_likelihood = 0.0;
-            int label_idx                  = 0;
-            float object_likelihood        = 0.0;
-
-            determine_class_and_object_likelihood(tensor_data,
-                                                  i,
-                                                  size_per_detection,
-                                                  qt_zero_point,
-                                                  qt_scale,
-                                                  &highest_class_likelihood,
-                                                  &label_idx,
-                                                  &object_likelihood);
-            // Log info about object
+        for (size_t i = 0; i < valid_detection_count; i++) {
+            const obb_detection_t* detection = &parsed_detections[i];
             syslog(LOG_INFO,
-                   "Object %d: Label=%s, Object Likelihood=%.2f, Class Likelihood=%.2f, ",
-                   valid_detection_count,
-                   labels[label_idx],
-                   object_likelihood,
-                   highest_class_likelihood);
-
-            float x1, y1, x2, y2;
-            determine_bbox_coordinates(tensor_data,
-                                       i,
-                                       size_per_detection,
-                                       qt_zero_point,
-                                       qt_scale,
-                                       &x1,
-                                       &y1,
-                                       &x2,
-                                       &y2);
-            syslog(LOG_INFO, "Bounding Box: [%.2f, %.2f, %.2f, %.2f]", x1, y1, x2, y2);
+                   "Object %zu: Label=%s, Confidence=%.2f, Angle=%.3f radians",
+                   i + 1,
+                   labels[detection->label_index],
+                   detection->confidence,
+                   detection->angle);
 
             // No need to compensate for rotation since bbox will handle this
             bbox_coordinates_frame_normalized(bbox);
-            bbox_rectangle(bbox, x1, y1, x2, y2);
+            bbox_quad(bbox,
+                      fminf(1.0F, fmaxf(0.0F, detection->corners[0].x)),
+                      fminf(1.0F, fmaxf(0.0F, detection->corners[0].y)),
+                      fminf(1.0F, fmaxf(0.0F, detection->corners[1].x)),
+                      fminf(1.0F, fmaxf(0.0F, detection->corners[1].y)),
+                      fminf(1.0F, fmaxf(0.0F, detection->corners[2].x)),
+                      fminf(1.0F, fmaxf(0.0F, detection->corners[2].y)),
+                      fminf(1.0F, fmaxf(0.0F, detection->corners[3].x)),
+                      fminf(1.0F, fmaxf(0.0F, detection->corners[3].y)));
+
+            json_t* corners = json_pack("[[f,f],[f,f],[f,f],[f,f]]",
+                                        detection->corners[0].x,
+                                        detection->corners[0].y,
+                                        detection->corners[1].x,
+                                        detection->corners[1].y,
+                                        detection->corners[2].x,
+                                        detection->corners[2].y,
+                                        detection->corners[3].x,
+                                        detection->corners[3].y);
+            if (!corners) {
+                json_decref(detections_json);
+                panic("Failed to create detection corners JSON");
+            }
+            json_t* oriented_box = json_pack("{s:f,s:f,s:f,s:f,s:f,s:O}",
+                                             "centerX",
+                                             detection->center_x,
+                                             "centerY",
+                                             detection->center_y,
+                                             "width",
+                                             detection->width,
+                                             "height",
+                                             detection->height,
+                                             "angleRadians",
+                                             detection->angle,
+                                             "corners",
+                                             corners);
+            json_decref(corners);
+            if (!oriented_box) {
+                json_decref(detections_json);
+                panic("Failed to create oriented box JSON");
+            }
+            json_t* item = json_pack("{s:s,s:f,s:O}",
+                                     "label",
+                                     labels[detection->label_index],
+                                     "confidence",
+                                     detection->confidence,
+                                     "orientedBox",
+                                     oriented_box);
+            json_decref(oriented_box);
+            if (!item || json_array_append(detections_json, item) != 0) {
+                json_decref(item);
+                json_decref(detections_json);
+                panic("Failed to create detection JSON");
+            }
+            json_decref(item);
+        }
+
+        if (valid_detection_count > 0) {
+            struct timeval result_time;
+            gettimeofday(&result_time, NULL);
+            json_int_t timestamp_ms = (json_int_t)result_time.tv_sec * 1000 +
+                                      (json_int_t)result_time.tv_usec / 1000;
+            json_t* result = json_pack("{s:I,s:O}",
+                                       "timestampUnixMs",
+                                       timestamp_ms,
+                                       "detections",
+                                       detections_json);
+            json_decref(detections_json);
+            char* result_json = result ? json_dumps(result, JSON_COMPACT) : NULL;
+            if (!result || !result_json) {
+                json_decref(result);
+                panic("Failed to serialize detection JSON");
+            }
+            if (!detection_result_publish(result_json, strlen(result_json))) {
+                syslog(LOG_ERR, "Failed to save detection result: %s", strerror(errno));
+            }
+            free(result_json);
+            json_decref(result);
+        } else {
+            json_decref(detections_json);
         }
 
         if (!bbox_commit(bbox, 0u)) {
@@ -505,6 +445,7 @@ int main(int argc, char** argv) {
 end:
     // Cleanup
     free(model_params);
+    free(parsed_detections);
     if (image_provider) {
         destroy_img_provider(image_provider);
     }
