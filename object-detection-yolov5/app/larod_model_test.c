@@ -78,7 +78,7 @@ static bool print_tensor(const char* kind,
 
     printf("%s[%zu]: datatype=%d shape=[", kind, index, (int)datatype);
     for (size_t i = 0; i < dims->len; i++) {
-        printf("%s%u", i == 0 ? "" : ", ", dims->dims[i]);
+        printf("%s%zu", i == 0 ? "" : ", ", dims->dims[i]);
     }
     printf("] bytes=%zu\n", size);
     return true;
