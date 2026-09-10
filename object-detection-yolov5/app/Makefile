@@ -48,11 +48,7 @@ $(PROG1): $(OBJS1)
 	cp $(DEBUG_DIR)/$@ .
 	$(STRIP) $@
 
-$(PROG2): $(OBJS2)
-  install -d $(DEBUG_DIR)
-  $(CC) $^ $(CFLAGS) $(LIBS) $(LDFLAGS) $(LDLIBS) -o $(DEBUG_DIR)/$@
-  cp $(DEBUG_DIR)/$@ .
-  $(STRIP) $@
+$(PROG2): $(OBJS2) ; install -d $(DEBUG_DIR) && $(CC) $^ $(CFLAGS) $(LIBS) $(LDFLAGS) $(LDLIBS) -o $(DEBUG_DIR)/$@ && cp $(DEBUG_DIR)/$@ . && $(STRIP) $@
 
 clean:
 	rm -rf $(PROGS) *.o *.eap* *_LICENSE.txt package.conf* param.conf tmp* manifest.json $(DEBUG_DIR)
