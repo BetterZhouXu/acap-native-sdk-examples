@@ -46,5 +46,6 @@ RUN . /opt/venv/bin/activate && \
 
 RUN cp /opt/app/manifest.json.${CHIP} /opt/app/manifest.json && \
     . /opt/axis/acapsdk/environment-setup* && acap-build . \
+    -a 'larod_model_test' \
     -a 'label/labels.txt' \
     -a 'model/model.tflite'

@@ -151,6 +151,34 @@ the 300-result cap, invalid metadata, atomic publishing, response retry, and con
 
 Install the generated `.eap` from `build/`, start the application, and query the endpoint shown above. Because the internal application name is `detection`, uninstall an older package with the same application name before installing the rebuilt package.
 
+### Isolate model inference failures
+
+The package includes `larod_model_test`. It loads the model, allocates its real Larod tensors,
+zero-fills and synchronizes the float32 input, creates a job request, and runs one inference. It does
+not use VDO, image preprocessing, OBB decoding, JSON, or FastCGI.
+
+Stop the main application, connect to the device over SSH, and run:
+
+```sh
+cd /usr/local/packages/detection
+./larod_model_test model/model.tflite cpu-tflite
+```
+
+For comparison, ARTPEC-8 uses:
+
+```sh
+./larod_model_test model/model.tflite axis-a8-dlpu-tflite
+```
+
+Interpretation:
+
+- `larodRunJob` fails in this utility: the failure is in the model, TensorFlow Lite/Larod runtime, or
+  firmware compatibility—not the application's camera preprocessing.
+- The utility succeeds but the application fails: investigate image preprocessing and shared input
+  transfer. The application explicitly synchronizes its normalized float input before inference.
+- Docker's zero-input TensorFlow Lite smoke inference fails: the model cannot invoke in ordinary
+  TensorFlow Lite either; inspect unsupported operators and the export.
+
 Application logs are available at:
 
 ```text

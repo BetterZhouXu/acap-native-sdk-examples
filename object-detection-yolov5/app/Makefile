@@ -1,6 +1,8 @@
 PROG1	= $(shell jq -r '.acapPackageConf.setup.appName' manifest.json)
 OBJS1	= object_detection_yolov5.c argparse.c detection_fastcgi.c detection_result.c imgprovider.c labelparse.c model.c panic.c yolov8_obb.c
-PROGS	= $(PROG1)
+PROG2	= larod_model_test
+OBJS2	= larod_model_test.c
+PROGS	= $(PROG1) $(PROG2)
 DEBUG_DIR = debug
 HOST_CC ?= cc
 HOST_TEST_FLAGS = -std=c11 -Wall -Wextra -Werror -I.
@@ -45,6 +47,12 @@ $(PROG1): $(OBJS1)
 	$(CC) $^ $(CFLAGS) $(LIBS) $(LDFLAGS) -lm $(LDLIBS) -o $(DEBUG_DIR)/$@
 	cp $(DEBUG_DIR)/$@ .
 	$(STRIP) $@
+
+$(PROG2): $(OBJS2)
+  install -d $(DEBUG_DIR)
+  $(CC) $^ $(CFLAGS) $(LIBS) $(LDFLAGS) $(LDLIBS) -o $(DEBUG_DIR)/$@
+  cp $(DEBUG_DIR)/$@ .
+  $(STRIP) $@
 
 clean:
 	rm -rf $(PROGS) *.o *.eap* *_LICENSE.txt package.conf* param.conf tmp* manifest.json $(DEBUG_DIR)

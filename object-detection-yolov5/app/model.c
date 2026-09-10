@@ -78,6 +78,9 @@ bool model_run_preprocessing(model_provider_t* provider, VdoBuffer* vdo_buf) {
         for (size_t i = 0; i < elements; i++) {
             output[i] = (float)input[i] / 255.0F;
         }
+        if (msync(provider->model_input_addr, provider->model_input_buffer_size, MS_SYNC) != 0) {
+            panic("%s: Could not synchronize float model input: %s", __func__, strerror(errno));
+        }
     }
 
     return true;

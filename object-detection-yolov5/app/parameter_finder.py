@@ -19,6 +19,7 @@ Validate YOLOv8 OBB tensor metadata and save it to a C header.
 """
 import sys
 
+import numpy as np
 import tensorflow as tf
 
 if len(sys.argv) > 1:
@@ -91,6 +92,21 @@ if len(labels) != num_classes:
 
 print(f"Validated YOLOv8 OBB input {input_shape}, output {output_shape}, "
       f"and {len(labels)} labels.")
+
+try:
+    interpreter.set_tensor(input_details[0]["index"], np.zeros(input_shape, dtype=np.float32))
+    interpreter.invoke()
+    smoke_output = interpreter.get_tensor(output_details[0]["index"])
+except Exception as error:  # TensorFlow Lite uses several backend-specific exception types.
+    print(f"Error: Zero-input TensorFlow Lite inference failed: {error}")
+    sys.exit(1)
+
+if list(smoke_output.shape) != output_shape or not np.all(np.isfinite(smoke_output)):
+    print(f"Error: Invalid zero-input inference output shape or non-finite values: "
+          f"{list(smoke_output.shape)}")
+    sys.exit(1)
+
+print("Zero-input TensorFlow Lite inference succeeded.")
 
 with open(output_file, "w") as f:
     f.write(f"#ifndef MODEL_PARAMS_H\n")
