@@ -35,23 +35,24 @@ interpreter.allocate_tensors()
 output_details = interpreter.get_output_details()
 input_details  = interpreter.get_input_details()
 
-if len(input_details) != 1 or len(output_details) != 1:
-    raise ValueError('Expected exactly one input and one output tensor')
-inp, out = input_details[0], output_details[0]
-if list(inp['shape']) != [1, 3, 640, 640] or list(out['shape']) != [1, 9, 8400] or \
-        inp['dtype'] != np.int8 or out['dtype'] != np.int8:
-    raise ValueError('Expected one INT8 NCHW input [1,3,640,640] and one INT8 OBB output [1,9,8400]')
+if len(input_details) != 1 or len(output_details) != 3:
+    raise ValueError('Expected one input and three OBB head outputs')
+inp = input_details[0]
+if list(inp['shape']) != [1, 3, 640, 640] or inp['dtype'] != np.int8:
+    raise ValueError('Expected INT8 NCHW input [1,3,640,640]')
+for output, shape in zip(output_details, ([1, 4, 8400], [1, 4, 8400], [1, 1, 8400])):
+    if list(output['shape']) != shape or output['dtype'] != np.int8:
+        raise ValueError(f'Expected INT8 OBB head output {shape}')
+for tensor in input_details + output_details:
+    if tensor['quantization'][0] <= 0 or \
+            len(tensor['quantization_parameters']['scales']) != 1:
+        raise ValueError('All tensors must have per-tensor affine quantization')
 
 input_scale, input_zero = inp['quantization']
-output_scale, output_zero = out['quantization']
-if input_scale <= 0 or output_scale <= 0 or any(
-        len(t['quantization_parameters']['scales']) != 1 for t in (inp, out)):
-    raise ValueError('Input and output must have per-tensor affine quantization')
 
 input_range = os.environ.get('MODEL_INPUT_RANGE', '0_1')
-output_coords = os.environ.get('MODEL_OUTPUT_COORDS', 'normalized')
-if input_range not in ('0_1', '0_255') or output_coords not in ('normalized', 'pixels'):
-    raise ValueError('MODEL_INPUT_RANGE must be 0_1 or 0_255; MODEL_OUTPUT_COORDS must be normalized or pixels')
+if input_range not in ('0_1', '0_255'):
+    raise ValueError('MODEL_INPUT_RANGE must be 0_1 or 0_255')
 
 with open(output_file, "w") as f:
     f.write(f"#ifndef MODEL_PARAMS_H\n")
@@ -59,9 +60,9 @@ with open(output_file, "w") as f:
     f.write("#define MODEL_INPUT_HEIGHT 640\n#define MODEL_INPUT_WIDTH 640\n\n")
     f.write(f"#define INPUT_SCALE {input_scale}f\n#define INPUT_ZERO_POINT {input_zero}\n")
     f.write(f"#define INPUT_DIVISOR {255 if input_range == '0_1' else 1}.0f\n")
-    f.write(f"#define OUTPUT_COORDS_NORMALIZED {1 if output_coords == 'normalized' else 0}\n")
-    f.write(f"#define QUANTIZATION_SCALE {output_scale}f\n")
-    f.write(f"#define QUANTIZATION_ZERO_POINT {output_zero}\n\n")
+    for name, output in zip(('DIST', 'CLASS', 'ANGLE'), output_details):
+        scale, zero = output['quantization']
+        f.write(f"#define {name}_SCALE {scale}f\n#define {name}_ZERO_POINT {zero}\n")
     f.write("#define NUM_CLASSES 4\n#define NUM_DETECTIONS 8400\n\n")
     f.write(f"#endif // MODEL_PARAMS_H\n")
 

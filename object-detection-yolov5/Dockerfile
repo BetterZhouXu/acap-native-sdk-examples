@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python3 -m venv /opt/venv
 
 # hadolint ignore=SC1091,DL3013
-RUN . /opt/venv/bin/activate && pip install --no-cache-dir tensorflow
+RUN . /opt/venv/bin/activate && pip install --no-cache-dir 'tensorflow==2.16.2' 'numpy<2'
 
 #-------------------------------------------------------------------------------
 # Build ACAP application
@@ -34,11 +34,12 @@ RUN test "$CHIP" = artpec8 && test -s model/model.tflite && test -s label/labels
 
 # Extract model parameters using the virtual environment
 ARG MODEL_INPUT_RANGE=0_1
-ARG MODEL_OUTPUT_COORDS=normalized
 # hadolint ignore=SC1091
-RUN . /opt/venv/bin/activate && python parameter_finder.py 'model/model.tflite'
+RUN . /opt/venv/bin/activate && \
+    python export_obb_raw.py model/model.tflite model/obb_raw.tflite && \
+    python parameter_finder.py model/obb_raw.tflite
 
 RUN cp /opt/app/manifest.json.${CHIP} /opt/app/manifest.json && \
     . /opt/axis/acapsdk/environment-setup* && acap-build . \
     -a 'label/labels.txt' \
-    -a 'model/model.tflite'
+    -a 'model/obb_raw.tflite'

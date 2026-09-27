@@ -11,24 +11,26 @@ app/model/model.tflite     # one signed INT8 NCHW input [1,3,640,640]
 app/label/labels.txt       # four lines, in model class-channel order
 ```
 
-The script `app/parameter_finder.py` rejects other input/output shapes,
-types or missing per-tensor affine quantization. The single signed INT8
-output must be `[1,9,8400]`, channel-major:
+The bundled original model has `[1,9,8400]` output but contains float32
+`DEQUANTIZE`, `COS` and `SIN` ops. During the Docker build,
+`app/export_obb_raw.py` converts this **specific model** (checked by SHA-256)
+into `model/obb_raw.tflite`, without those ops. It fails rather than silently
+altering a different model. `app/parameter_finder.py` checks the resulting
+per-tensor INT8 input and the three INT8 channel-major outputs:
 
 ```
-channel 0..3: center x, center y, width, height
-channel 4..7: class 0..3 confidence (no YOLOv5 objectness channel)
-channel 8:    angle in radians
+output 0 [1,4,8400]: DFL distances left, top, right, bottom (grid cells)
+output 1 [1,4,8400]: class 0..3 confidence (no objectness channel)
+output 2 [1,1,8400]: angle in radians
 ```
 
-The image is resized to 640×640 planar RGB by Larod cpu-proc and then
-quantized into a separate INT8 model input using its input scale/zero point. The default
-assumption is RGB pixels divided by 255 and **normalized** output xywh. If
-your exported model expects unnormalized RGB pixels or returns xywh in pixels,
-set the corresponding Docker build arguments to `0_255` or `pixels`. These
-conventions **cannot be determined from tensor shape/quantization metadata**;
-inspect your model/export pipeline. The angle must be in radians and the output
-must contain decoded xywh and class confidence, not raw feature-map logits.
+The image is resized to 640x640 planar RGB by Larod cpu-proc and then
+quantized into a separate INT8 model input using its input scale/zero point.
+The default assumes RGB pixels divided by 255; set `MODEL_INPUT_RANGE=0_255`
+if your export expects unnormalized pixels. The C code decodes the 80x80,
+40x40 and 20x20 anchor grids (strides 8, 16, 32), applies angle sine/cosine
+to the DFL box-center offset, and draws rotated boxes. These output semantics
+are specific to this model; the original `[1,9,8400]` model is NOT packaged.
 
 ```sh
 cd object-detection-yolov5
@@ -36,20 +38,37 @@ mkdir -p app/model app/label
 # Copy your model into app/model/model.tflite and your four labels into app/label/labels.txt.
 docker build --platform=linux/amd64 -t yolov8-obb-artpec8 \
   --build-arg ARCH=aarch64 --build-arg CHIP=artpec8 \
-  --build-arg MODEL_INPUT_RANGE=0_1 \
-  --build-arg MODEL_OUTPUT_COORDS=normalized .
+  --build-arg MODEL_INPUT_RANGE=0_1 .
 docker cp $(docker create --platform=linux/amd64 yolov8-obb-artpec8):/opt/app ./build
 ```
 
 The application runs on `axis-a8-dlpu-tflite`. It dequantizes each output
-channel with the model output scale and zero point, selects the highest class
+with its own scale and zero point, selects the highest class
 score per candidate, sorts by score, applies class-aware rotated polygon IoU
 NMS (up to 300 candidates and 100 drawn detections), and draws quadrilaterals
 through the Axis Bounding Box API. The application parameters
 `ConfThresholdPercent` and `IouThresholdPercent` control filtering.
 
-**Note:** A single INT8 scale shared by pixel-space coordinates, angle and
-probabilities can severely degrade confidence and angle resolution. Check the
-actual output scale and predicted values on a test image; prefer a normalized
-xywh output if the model can be re-exported. A successful build alone does not
-establish accuracy or ARTPEC-8 compatibility; test the model on the device.
+The three outputs now retain separate quantization scales, avoiding a shared
+scale across coordinates, angles, and probabilities. A desktop CPU invocation
+of the transformed model succeeds. **This does not prove ARTPEC-8 compatibility**:
+other operators may still fail on the camera, so test on the device.
+
+## Collect Larod startup logs
+
+After starting the application and reproducing the failure, collect the full
+camera system log with the provided script from your computer:
+
+```sh
+./collect_larod_logs.sh https://CAMERA_IP startup.log
+```
+
+It prompts for camera credentials and saves both the full log and a filtered
+`startup.log.larod` excerpt. Include the Larod/delegate lines **before** the
+`failure when invoking interpreter` line when reporting an issue; redact
+credentials, IPs, and other sensitive camera details before sharing. For an
+HTTPS camera with a self-signed certificate, prefix the command with
+`CURL_INSECURE=1` only if you trust the camera/network. For an
+SSH-enabled device, `journalctl -b -u larod --no-pager -n 300` may offer
+additional service-level errors. Neither Docker nor the local workspace can
+read camera logs without access to the camera.

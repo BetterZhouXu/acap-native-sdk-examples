@@ -18,7 +18,7 @@
  * - object_detection_yolov8 (YOLOv8 OBB variant) -
  *
  * This application loads an INT8 YOLOv8 OBB model on ARTPEC-8. Its channel-major
- * output is decoded into oriented quadrilaterals, class scores and angles.
+ * head outputs are decoded into oriented quadrilaterals in C.
  *
  * The application expects two arguments on the command line in the
  * following order: MODELFILE LABELSFILE.
@@ -61,8 +61,6 @@ static void shutdown(int status) {
 typedef struct model_params {
     int input_width;
     int input_height;
-    float quantization_scale;
-    float quantization_zero_point;
     int num_classes;
     int num_detections;
 } model_params_t;
@@ -118,9 +116,9 @@ typedef struct detection {
     int label;
 } detection_t;
 
-static float channel(const int8_t* data, int channel_idx, int idx, const model_params_t* p) {
-    return (data[channel_idx * p->num_detections + idx] - p->quantization_zero_point) *
-           p->quantization_scale;
+static float channel(const int8_t* data, int channel_idx, int idx, int num_detections,
+                     float scale, int zero_point) {
+    return (data[channel_idx * num_detections + idx] - zero_point) * scale;
 }
 
 static int compare_scores(const void* a, const void* b) {
@@ -165,27 +163,38 @@ static float rotated_iou(const detection_t* a, const detection_t* b) {
     return intersection / (a->area + b->area - intersection);
 }
 
-static int decode_detections(const int8_t* data, const model_params_t* p,
+static int decode_detections(const int8_t* distances, const int8_t* classes,
+                             const int8_t* angles, const model_params_t* p,
                              float threshold, detection_t* detections) {
     int count = 0;
     for (int i = 0; i < p->num_detections; ++i) {
         float score = -INFINITY;
         int label = 0;
         for (int c = 0; c < p->num_classes; ++c) {
-            float value = channel(data, 4 + c, i, p);  // YOLOv8 has no objectness channel
+            float value = channel(classes, c, i, p->num_detections, CLASS_SCALE,
+                                  CLASS_ZERO_POINT);  // YOLOv8 has no objectness channel
             if (value > score) { score = value; label = c; }
         }
         if (!isfinite(score) || score < threshold) continue;
-        float x = channel(data, 0, i, p) / (OUTPUT_COORDS_NORMALIZED ? 1 : p->input_width);
-        float y = channel(data, 1, i, p) / (OUTPUT_COORDS_NORMALIZED ? 1 : p->input_height);
-        float w = channel(data, 2, i, p) / (OUTPUT_COORDS_NORMALIZED ? 1 : p->input_width);
-        float h = channel(data, 3, i, p) / (OUTPUT_COORDS_NORMALIZED ? 1 : p->input_height);
-        float angle = channel(data, 4 + p->num_classes, i, p);
+        float l = channel(distances, 0, i, p->num_detections, DIST_SCALE, DIST_ZERO_POINT);
+        float t = channel(distances, 1, i, p->num_detections, DIST_SCALE, DIST_ZERO_POINT);
+        float r = channel(distances, 2, i, p->num_detections, DIST_SCALE, DIST_ZERO_POINT);
+        float b = channel(distances, 3, i, p->num_detections, DIST_SCALE, DIST_ZERO_POINT);
+        float angle = channel(angles, 0, i, p->num_detections, ANGLE_SCALE, ANGLE_ZERO_POINT);
+        // YOLOv8 OBB DFL distances use 80x80, 40x40, 20x20 anchor grids.
+        int side = i < 6400 ? 80 : (i < 8000 ? 40 : 20);
+        int index = i < 6400 ? i : (i < 8000 ? i - 6400 : i - 8000);
+        int stride = p->input_width / side;
+        float cs = cosf(angle), sn = sinf(angle);
+        float dx = (r - l) / 2, dy = (b - t) / 2;
+        float x = ((index % side + 0.5f) + dx * cs - dy * sn) * stride / p->input_width;
+        float y = ((index / side + 0.5f) + dx * sn + dy * cs) * stride / p->input_height;
+        float w = (l + r) * stride / p->input_width;
+        float h = (t + b) * stride / p->input_height;
         if (!isfinite(x) || !isfinite(y) || !isfinite(w) || !isfinite(h) ||
             !isfinite(angle) || w <= 0 || h <= 0) continue;
         detection_t* d = &detections[count++];
         d->score = score; d->label = label; d->area = w * h;
-        float cs = cosf(angle), sn = sinf(angle);
         for (int k = 0; k < 4; ++k) {
             float dx = (k == 0 || k == 3 ? -w : w) / 2;
             float dy = (k < 2 ? -h : h) / 2;
@@ -218,8 +227,6 @@ int main(int argc, char** argv) {
     // Comes from model_params.h
     model_params->input_width             = MODEL_INPUT_WIDTH;
     model_params->input_height            = MODEL_INPUT_HEIGHT;
-    model_params->quantization_scale      = QUANTIZATION_SCALE;
-    model_params->quantization_zero_point = QUANTIZATION_ZERO_POINT;
     model_params->num_classes             = NUM_CLASSES;
     model_params->num_detections          = NUM_DETECTIONS;
 
@@ -227,8 +234,6 @@ int main(int argc, char** argv) {
            "Model input size w/h: %d x %d",
            model_params->input_width,
            model_params->input_height);
-    syslog(LOG_INFO, "Quantization scale: %f", model_params->quantization_scale);
-    syslog(LOG_INFO, "Quantization zero point: %f", model_params->quantization_zero_point);
     syslog(LOG_INFO, "Number of classes: %d", model_params->num_classes);
     syslog(LOG_INFO, "Number of detections: %d", model_params->num_detections);
 
@@ -296,7 +301,7 @@ int main(int argc, char** argv) {
     if (!model_provider) {
         panic("%s: Could not create model provider", __func__);
     }
-    if (number_output_tensors != 1) panic("Expected exactly one OBB output tensor");
+    if (number_output_tensors != 3) panic("Expected three OBB head output tensors");
     tensor_outputs = calloc(number_output_tensors, sizeof(model_tensor_output_t));
     if (!tensor_outputs) {
         panic("%s: Could not allocate tensor outputs", __func__);
@@ -386,13 +391,17 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (tensor_outputs[0].size != (size_t)(9 * model_params->num_detections)) {
-            panic("Unexpected OBB output size %zu", tensor_outputs[0].size);
+        if (tensor_outputs[0].size != (size_t)(4 * model_params->num_detections) ||
+            tensor_outputs[1].size != (size_t)(4 * model_params->num_detections) ||
+            tensor_outputs[2].size != (size_t)model_params->num_detections) {
+            panic("Unexpected OBB head output sizes: %zu %zu %zu",
+                  tensor_outputs[0].size, tensor_outputs[1].size, tensor_outputs[2].size);
         }
-        const int8_t* tensor_data = tensor_outputs[0].data;
         // Parse the output
         gettimeofday(&start_ts, NULL);
-        int count = decode_detections(tensor_data, model_params, conf_threshold, detections);
+        int count = decode_detections(tensor_outputs[0].data, tensor_outputs[1].data,
+                                      tensor_outputs[2].data, model_params,
+                                      conf_threshold, detections);
         gettimeofday(&end_ts, NULL);
         syslog(LOG_INFO, "Ran parsing for %u ms", elapsed_ms(&start_ts, &end_ts));
 
