@@ -1,14 +1,14 @@
 # YOLOv8 OBB on ARTPEC-8
 
 This variant replaces the YOLOv5 example's detector with a **user-supplied**
-ARTPEC-8-compatible, per-tensor INT8 TensorFlow Lite YOLOv8 OBB model. No model
-weights or training labels are included in this repository.
+ARTPEC-8-compatible, per-tensor INT8 TensorFlow Lite YOLOv8 OBB model. The
+model and its four labels are supplied under `app/`.
 
 Place these files in this directory before building:
 
 ```
-model/model.tflite     # one signed INT8 NCHW input [1,3,640,640]
-label/labels.txt       # four lines, in model class-channel order
+app/model/model.tflite     # one signed INT8 NCHW input [1,3,640,640]
+app/label/labels.txt       # four lines, in model class-channel order
 ```
 
 The script `app/parameter_finder.py` rejects other input/output shapes,
@@ -32,8 +32,8 @@ must contain decoded xywh and class confidence, not raw feature-map logits.
 
 ```sh
 cd object-detection-yolov5
-mkdir -p model label
-# Copy your model into model/model.tflite and your four labels into label/labels.txt.
+mkdir -p app/model app/label
+# Copy your model into app/model/model.tflite and your four labels into app/label/labels.txt.
 docker build --platform=linux/amd64 -t yolov8-obb-artpec8 \
   --build-arg ARCH=aarch64 --build-arg CHIP=artpec8 \
   --build-arg MODEL_INPUT_RANGE=0_1 \

@@ -23,23 +23,14 @@ RUN python3 -m venv /opt/venv
 RUN . /opt/venv/bin/activate && pip install --no-cache-dir tensorflow
 
 #-------------------------------------------------------------------------------
-# Supply the ARTPEC-8-compatible YOLOv8 OBB model and its four labels locally.
-#-------------------------------------------------------------------------------
-
-WORKDIR /opt/app/model
-ARG CHIP=artpec8
-RUN test "$CHIP" = artpec8
-COPY ./model/model.tflite ./model.tflite
-
-WORKDIR /opt/app/label
-COPY ./label/labels.txt ./labels.txt
-
-#-------------------------------------------------------------------------------
 # Build ACAP application
 #-------------------------------------------------------------------------------
 
 WORKDIR /opt/app
+# Includes app/model/model.tflite and app/label/labels.txt.
 COPY ./app .
+ARG CHIP=artpec8
+RUN test "$CHIP" = artpec8 && test -s model/model.tflite && test -s label/labels.txt
 
 # Extract model parameters using the virtual environment
 ARG MODEL_INPUT_RANGE=0_1
