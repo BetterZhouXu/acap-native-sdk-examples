@@ -45,6 +45,13 @@ typedef struct model_provider {
     larodMap* crop_map;
 
     size_t image_buffer_size;
+    void* quant_input_addr;
+    size_t quant_input_size;
+    void* model_input_addr;
+    size_t model_input_size;
+    float input_scale;
+    float input_divisor;
+    int input_zero_point;
 
     int image_input_fd;
     void* image_input_addr;
@@ -73,6 +80,9 @@ model_provider_t* create_model_provider(unsigned int input_width,
                                         char* model_file,
                                         char* device_name,
                                         bool allow_input_crop,
-                                        size_t* num_output_tensors);
+                                        size_t* num_output_tensors,
+                                        float input_scale,
+                                        int input_zero_point,
+                                        float input_divisor);
 
 void destroy_model_provider(model_provider_t* provider);

@@ -15,7 +15,7 @@
     },
     "acapPackageConf": {
         "setup": {
-            "friendlyName": "object_detection_yolov5_artpec8",
+            "friendlyName": "YOLOv8 OBB detection ARTPEC-8",
             "appName": "object_detection_yolov5",
             "vendor": "Axis Communications",
             "embeddedSdkVersion": "3.0",
@@ -33,7 +33,7 @@
                 },
                 {
                     "name": "IouThresholdPercent",
-                    "default": "5",
+                    "default": "45",
                     "type": "int:maxlen=3;min=0;max=100"
                 }
             ]

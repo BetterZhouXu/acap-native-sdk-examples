@@ -21,6 +21,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -31,7 +32,7 @@
 bool model_get_tensor_output_info(model_provider_t* provider,
                                   unsigned int tensor_output_index,
                                   model_tensor_output_t* tensor_output) {
-    if (tensor_output_index > (provider->num_outputs)) {
+    if (tensor_output_index >= provider->num_outputs) {
         panic("%s: Invalid output index %u", __func__, tensor_output_index);
     }
     *tensor_output = provider->model_output_tensors[tensor_output_index];
@@ -70,6 +71,17 @@ bool model_run_preprocessing(model_provider_t* provider, VdoBuffer* vdo_buf) {
         return false;
     }
     nbr_power_retries = 0;
+    // cpu-proc produces uint8 planar RGB; the model consumes signed INT8.
+    // Normalize pixels according to the model's training/export convention.
+    const uint8_t* pixels = provider->quant_input_addr;
+    int8_t* quantized = provider->model_input_addr;
+    for (size_t i = 0; i < provider->quant_input_size; ++i) {
+        int value = (int)lroundf((pixels[i] / provider->input_divisor) / provider->input_scale) +
+                    provider->input_zero_point;
+        if (value < -128) value = -128;
+        if (value > 127) value = 127;
+        quantized[i] = (int8_t)value;
+    }
     return true;
 }
 
@@ -354,6 +366,12 @@ void destroy_model_provider(model_provider_t* provider) {
     if (provider->image_input_addr != MAP_FAILED) {
         munmap(provider->image_input_addr, provider->image_buffer_size);
     }
+    if (provider->quant_input_addr != MAP_FAILED && provider->quant_input_addr) {
+        munmap(provider->quant_input_addr, provider->quant_input_size);
+    }
+    if (provider->model_input_addr != MAP_FAILED && provider->model_input_addr) {
+        munmap(provider->model_input_addr, provider->model_input_size);
+    }
     if (provider->image_input_fd >= 0) {
         close(provider->image_input_fd);
     }
@@ -397,11 +415,19 @@ model_provider_t* create_model_provider(unsigned int input_width,
                                         char* model_file,
                                         char* device_name,
                                         bool allow_input_crop,
-                                        size_t* num_output_tensors) {
+                                        size_t* num_output_tensors,
+                                        float input_scale,
+                                        int input_zero_point,
+                                        float input_divisor) {
     model_provider_t* provider = calloc(1, sizeof(model_provider_t));
     if (!provider) {
         panic("%s: Unable to allocate model_provider_t: %s", __func__, strerror(errno));
     }
+    provider->quant_input_addr = MAP_FAILED;
+    provider->model_input_addr = MAP_FAILED;
+    provider->input_scale = input_scale;
+    provider->input_zero_point = input_zero_point;
+    provider->input_divisor = input_divisor;
 
     larodError* error = NULL;
 
@@ -497,6 +523,29 @@ model_provider_t* create_model_provider(unsigned int input_width,
             panic("%s Currently only 1 pp output tensor is supported but %zu was received",
                   __func__,
                   provider->pp_num_outputs);
+        }
+        int quant_fd = larodGetTensorFd(provider->pp_output_tensors[0], &error);
+        if (quant_fd == LAROD_INVALID_FD ||
+            !larodGetTensorFdSize(provider->pp_output_tensors[0],
+                                  &provider->quant_input_size, &error)) {
+            panic("%s: Could not access preprocessing output", __func__);
+        }
+        provider->quant_input_addr = mmap(NULL, provider->quant_input_size,
+                                          PROT_READ | PROT_WRITE, MAP_SHARED, quant_fd, 0);
+        if (provider->quant_input_addr == MAP_FAILED) {
+            panic("%s: Could not map preprocessing output: %s", __func__, strerror(errno));
+        }
+        int model_fd = larodGetTensorFd(provider->input_tensors[0], &error);
+        if (model_fd == LAROD_INVALID_FD ||
+            !larodGetTensorFdSize(provider->input_tensors[0],
+                                  &provider->model_input_size, &error) ||
+            provider->model_input_size != provider->quant_input_size) {
+            panic("%s: Incompatible preprocessing output and model input sizes", __func__);
+        }
+        provider->model_input_addr = mmap(NULL, provider->model_input_size,
+                                          PROT_READ | PROT_WRITE, MAP_SHARED, model_fd, 0);
+        if (provider->model_input_addr == MAP_FAILED) {
+            panic("%s: Could not map model input: %s", __func__, strerror(errno));
         }
 
         // Needed to be used for copying data
@@ -595,10 +644,10 @@ model_provider_t* create_model_provider(unsigned int input_width,
         }
         larodDestroyMap(&provider->crop_map);
 
-        // App supports only one input/output tensor.
+        // Keep preprocessing UINT8 and inference INT8 tensors separate.
         provider->inf_req = larodCreateJobRequest(model,
-                                                  provider->pp_output_tensors,
-                                                  provider->pp_num_outputs,
+                                                  provider->input_tensors,
+                                                  provider->num_inputs,
                                                   provider->output_tensors,
                                                   provider->num_outputs,
                                                   NULL,

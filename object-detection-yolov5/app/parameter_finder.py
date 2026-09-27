@@ -19,6 +19,8 @@ Check your model quantization parameters and save them to file
 """
 import tensorflow as tf
 import sys
+import os
+import numpy as np
 
 if len(sys.argv) > 1:
     model_path = sys.argv[1]
@@ -33,25 +35,34 @@ interpreter.allocate_tensors()
 output_details = interpreter.get_output_details()
 input_details  = interpreter.get_input_details()
 
-# The input format should be (batch, height, width, channel) but better verify
-# with a test in case width and height are flipped.
-model_input_height = input_details[0]["shape"][1]
-model_input_width  = input_details[0]["shape"][2]
+if len(input_details) != 1 or len(output_details) != 1:
+    raise ValueError('Expected exactly one input and one output tensor')
+inp, out = input_details[0], output_details[0]
+if list(inp['shape']) != [1, 3, 640, 640] or list(out['shape']) != [1, 9, 8400] or \
+        inp['dtype'] != np.int8 or out['dtype'] != np.int8:
+    raise ValueError('Expected one INT8 NCHW input [1,3,640,640] and one INT8 OBB output [1,9,8400]')
 
-quantization_scale, quantization_zero_point = output_details[0]['quantization']
-num_classes    = output_details[0]['shape'][2] - 5 # Removing 5 values that are
-                                                   # x,y,w,h,obj_conf
-num_detections = output_details[0]['shape'][1]
+input_scale, input_zero = inp['quantization']
+output_scale, output_zero = out['quantization']
+if input_scale <= 0 or output_scale <= 0 or any(
+        len(t['quantization_parameters']['scales']) != 1 for t in (inp, out)):
+    raise ValueError('Input and output must have per-tensor affine quantization')
+
+input_range = os.environ.get('MODEL_INPUT_RANGE', '0_1')
+output_coords = os.environ.get('MODEL_OUTPUT_COORDS', 'normalized')
+if input_range not in ('0_1', '0_255') or output_coords not in ('normalized', 'pixels'):
+    raise ValueError('MODEL_INPUT_RANGE must be 0_1 or 0_255; MODEL_OUTPUT_COORDS must be normalized or pixels')
 
 with open(output_file, "w") as f:
     f.write(f"#ifndef MODEL_PARAMS_H\n")
     f.write(f"#define MODEL_PARAMS_H\n\n")
-    f.write(f"#define MODEL_INPUT_HEIGHT {model_input_height}\n")
-    f.write(f"#define MODEL_INPUT_WIDTH {model_input_width}\n\n")
-    f.write(f"#define QUANTIZATION_SCALE {quantization_scale}f\n")
-    f.write(f"#define QUANTIZATION_ZERO_POINT {quantization_zero_point}\n\n")
-    f.write(f"#define NUM_CLASSES {num_classes}\n")
-    f.write(f"#define NUM_DETECTIONS {num_detections}\n\n")
+    f.write("#define MODEL_INPUT_HEIGHT 640\n#define MODEL_INPUT_WIDTH 640\n\n")
+    f.write(f"#define INPUT_SCALE {input_scale}f\n#define INPUT_ZERO_POINT {input_zero}\n")
+    f.write(f"#define INPUT_DIVISOR {255 if input_range == '0_1' else 1}.0f\n")
+    f.write(f"#define OUTPUT_COORDS_NORMALIZED {1 if output_coords == 'normalized' else 0}\n")
+    f.write(f"#define QUANTIZATION_SCALE {output_scale}f\n")
+    f.write(f"#define QUANTIZATION_ZERO_POINT {output_zero}\n\n")
+    f.write("#define NUM_CLASSES 4\n#define NUM_DETECTIONS 8400\n\n")
     f.write(f"#endif // MODEL_PARAMS_H\n")
 
 print(f"Model parameters have been saved to {output_file}.")

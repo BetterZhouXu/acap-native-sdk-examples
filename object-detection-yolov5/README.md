@@ -1,5 +1,11 @@
 *Copyright (C) 2025, Axis Communications AB, Lund, Sweden. All Rights Reserved.*
 
+> [!IMPORTANT]
+> This branch has been adapted for a user-supplied YOLOv8 OBB INT8 ARTPEC-8 model.
+> **Follow [YOLOv8 OBB build and output instructions](YOLOV8_OBB.md) instead.**
+> The original YOLOv5/COCO parsing, model download, and build instructions below are
+> retained as historical reference and no longer describe this branch.
+
 <!-- omit from toc -->
 # Object detection with YOLOv5
 
@@ -39,7 +45,7 @@ object-detection-yolov5
 │   ├── manifest.json.cpu
 │   ├── model.c
 │   ├── model.h
-│   ├── object_detection_yolov5.c
+│   ├── object_detection_yolov8.c
 │   ├── panic.c
 │   ├── panic.h
 │   └── parameter_finder.py
@@ -60,7 +66,7 @@ ARTPEC-9 DLPU with TensorFlow Lite.
 ARTPEC-8 DLPU with TensorFlow Lite.
 - **app/manifest.json.cpu** - Defines the application and its configuration when building for
 CPU with TensorFlow Lite.
-- **app/object_detection_yolov5.c** - Application source code in C.
+- **app/object_detection_yolov8.c** - Application source code in C.
 - **app/model.c/h** - Implementation of Larod parts.
 - **app/panic.c/h** - Utility for exiting the program on error.
 - **app/parameter_finder.py** - Python script to create `model_params.h`, containing model specific
