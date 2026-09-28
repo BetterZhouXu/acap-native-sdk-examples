@@ -49,7 +49,7 @@
 #include <sys/time.h>
 #include <syslog.h>
 
-#define APP_NAME "object_detection_yolov5"
+#define APP_NAME "object_detection_yolov8"
 
 volatile sig_atomic_t running = 1;
 

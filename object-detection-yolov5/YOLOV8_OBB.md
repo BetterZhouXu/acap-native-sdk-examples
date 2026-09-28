@@ -42,6 +42,11 @@ docker build --platform=linux/amd64 -t yolov8-obb-artpec8 \
 docker cp $(docker create --platform=linux/amd64 yolov8-obb-artpec8):/opt/app ./build
 ```
 
+The app/executable name is `object_detection_yolov8`; the EAP file is named
+`object_detection_yolov8_artpec8_1_0_0_<ARCH>.eap`. This is a new package
+identity, not an in-place upgrade of `object_detection_yolov5`. Uninstall the
+old package separately if it is still on the camera.
+
 The application runs on `axis-a8-dlpu-tflite`. It dequantizes each output
 with its own scale and zero point, selects the highest class
 score per candidate, sorts by score, applies class-aware rotated polygon IoU

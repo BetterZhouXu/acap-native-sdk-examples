@@ -16,10 +16,10 @@
     "acapPackageConf": {
         "setup": {
             "friendlyName": "YOLOv8 OBB detection ARTPEC-8",
-            "appName": "object_detection_yolov5",
+            "appName": "object_detection_yolov8",
             "vendor": "Axis Communications",
             "embeddedSdkVersion": "3.0",
-            "runOptions": "/usr/local/packages/object_detection_yolov5/model/obb_raw.tflite /usr/local/packages/object_detection_yolov5/label/labels.txt -c axis-a8-dlpu-tflite",
+            "runOptions": "/usr/local/packages/object_detection_yolov8/model/obb_raw.tflite /usr/local/packages/object_detection_yolov8/label/labels.txt -c axis-a8-dlpu-tflite",
             "vendorUrl": "https://www.axis.com",
             "runMode": "never",
             "version": "1.0.0"

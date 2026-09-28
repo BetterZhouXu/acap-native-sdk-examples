@@ -22,6 +22,6 @@ else
         "$camera/axis-cgi/admin/systemlog.cgi" --output "$output"
 fi
 
-grep -i -E 'larod|tflite|delegate|dlpu|object_detection_yolov5|interpreter' \
+grep -i -E 'larod|tflite|delegate|dlpu|object_detection_yolov8|interpreter' \
     "$output" > "$output.larod" || true
 printf 'Saved full camera log: %s\nRelevant lines: %s.larod\n' "$output" "$output"

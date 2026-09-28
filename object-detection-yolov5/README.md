@@ -261,7 +261,7 @@ Standing in your working directory run the following commands:
 docker build --platform=linux/amd64 --tag <APP_IMAGE> --build-arg ARCH=<ARCH> --build-arg CHIP=<CHIP> .
 ```
 
-- `<APP_IMAGE>` is the name to tag the image with, e.g., `object_detection_yolov5:1.0`.
+- `<APP_IMAGE>` is the name to tag the image with, e.g., `object_detection_yolov8:1.0`.
 - `<ARCH>` is the SDK architecture, `armv7hf` or `aarch64`.
 - `<CHIP>` is the chip type, `artpec9`, `artpec8`, or `cpu`.
 
@@ -280,7 +280,7 @@ docker cp $(docker create --platform=linux/amd64 <APP_IMAGE>):/opt/app ./build
 The `build` directory contains the build artifacts, where the ACAP application is found with suffix
 `.eap`, depending on which architecture and chip chosen:
 
-- `object_detection_yolov5_<CHIP>_1_0_0_<ARCH>.eap`.
+- `object_detection_yolov8_<CHIP>_1_0_0_<ARCH>.eap`.
 
 > [!NOTE]
 >
@@ -299,7 +299,7 @@ http://<AXIS_DEVICE_IP>/index.html#apps
 3. Click **(+ Add app)** button to upload the application file
 4. Select the newly built application package, depending on architecture:
 
-   - `object_detection_yolov5_<CHIP>_1_0_0_<ARCH>.eap`
+   - `object_detection_yolov8_<CHIP>_1_0_0_<ARCH>.eap`
 
 5. Click **Install**
 6. Run the application by enabling the **Start** switch
@@ -323,7 +323,7 @@ bounding boxes directly on the device stream. View the stream by following the i
 
 The application log can be found by either:
 
-- Browsing to `http://<AXIS_DEVICE_IP>/axis-cgi/admin/systemlog.cgi?appname=object_detection_yolov5`.
+- Browsing to `http://<AXIS_DEVICE_IP>/axis-cgi/admin/systemlog.cgi?appname=object_detection_yolov8`.
 - Browsing to the application page and click the `App log`.
 
 Depending on selected device, different output is received.
